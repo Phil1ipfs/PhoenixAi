@@ -13,8 +13,8 @@ function TreeNode({ pid, entry, depth, onOpen, active }: { pid: string; entry: T
   };
   return (
     <div>
-      <div onClick={toggle} style={{ paddingLeft: depth * 12 + 6 }} data-path={entry.path}
-        className={`cursor-pointer truncate py-0.5 text-sm hover:bg-zinc-800 ${active === entry.path ? "bg-zinc-800 text-orange-400" : "text-zinc-300"}`}>
+      <div onClick={toggle} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } }} style={{ paddingLeft: depth * 12 + 6 }} data-path={entry.path}
+        className={`cursor-pointer truncate rounded-md py-0.5 text-sm hover:bg-zinc-800 ${active === entry.path ? "bg-zinc-800 text-orange-400" : "text-zinc-300"}`}>
         {entry.type === "dir" ? (open ? "▾ " : "▸ ") : "· "}{entry.name}
       </div>
       {open && kids?.map((k) => <TreeNode key={k.path} pid={pid} entry={k} depth={depth + 1} onOpen={onOpen} active={active} />)}
@@ -121,30 +121,30 @@ export default function Code({ busy, setBusy }: { busy: boolean; setBusy: (b: bo
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 p-2 text-sm">
-        <select value={pid} onChange={(e) => setPid(e.target.value)} className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1" aria-label="Project">
+      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-2 text-sm">
+        <select value={pid} onChange={(e) => setPid(e.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5" aria-label="Project">
           {projects.length === 0 && <option value="">No project authorized</option>}
           {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
-        <button onClick={pick} className="rounded bg-orange-600 px-2 py-1 hover:bg-orange-500">Choose folder…</button>
+        <button onClick={pick} className="rounded ember-bg text-white px-2 py-1 hover:brightness-110">Choose folder…</button>
         <input value={pathInput} onChange={(e) => setPathInput(e.target.value)} placeholder="or paste a folder path" aria-label="Folder path"
-          onKeyDown={(e) => e.key === "Enter" && pathInput && addProject(pathInput)} className="w-64 rounded border border-zinc-700 bg-zinc-900 px-2 py-1" />
-        <button onClick={() => pathInput && addProject(pathInput)} className="rounded border border-zinc-700 px-2 py-1 hover:bg-zinc-800">Authorize</button>
+          onKeyDown={(e) => e.key === "Enter" && pathInput && addProject(pathInput)} className="w-full rounded-lg border sm:w-64 border-zinc-700 bg-zinc-900 px-2.5 py-1.5" />
+        <button onClick={() => pathInput && addProject(pathInput)} className="rounded-lg border border-zinc-700 px-2 py-1 hover:bg-zinc-800">Authorize</button>
         {pid && <button onClick={removeProject} className="ml-auto rounded px-2 py-1 text-zinc-500 hover:text-red-400">Remove project</button>}
       </div>
-      {error && <div className="px-3 py-1 text-sm text-red-400" role="alert">⚠ {error}</div>}
+      {error && <div className="px-3 py-1 text-sm text-red-400" role="alert">{error}</div>}
       {!pid ? (
         <div className="m-auto max-w-md text-center text-zinc-500">
           <p>Authorize a project folder to start. PHOENIX can only read inside folders you choose here, never secrets (.env, keys), and never changes a file without your approval.</p>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1">
-          <div className="flex w-64 shrink-0 flex-col border-r border-zinc-800">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-visible">
+          <div className="flex max-h-60 w-full shrink-0 flex-col border-b border-zinc-800 lg:max-h-none lg:w-64 lg:border-b-0 lg:border-r">
             <div className="space-y-1 p-2">
               <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runSearch()} placeholder="Search code…" aria-label="Search code"
-                className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm" />
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-sm" />
               <input value={glob} onChange={(e) => setGlob(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runSearch()} placeholder="Filter files: *.py, src/*" aria-label="File filter"
-                className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm" />
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-sm" />
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto" data-testid="tree">
               {hits ? (
@@ -161,14 +161,14 @@ export default function Code({ busy, setBusy }: { busy: boolean; setBusy: (b: bo
             </div>
           </div>
 
-          <div className="flex min-w-0 flex-1 flex-col border-r border-zinc-800">
+          <div className="flex min-h-72 min-w-0 flex-1 flex-col border-b border-zinc-800 lg:min-h-0 lg:border-b-0 lg:border-r">
             {file ? (
               <>
                 <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-1.5 text-sm">
                   <span className="font-mono text-zinc-300">{file.path}</span>
                   <span className="text-xs text-zinc-600">{file.total_lines} lines{file.truncated ? " (truncated view)" : ""}</span>
-                  <button disabled={busy} onClick={() => ask("explain")} className="ml-auto rounded bg-zinc-800 px-2 py-0.5 hover:bg-zinc-700 disabled:opacity-40">Explain</button>
-                  <button disabled={busy} onClick={() => ask("bugs")} className="rounded bg-zinc-800 px-2 py-0.5 hover:bg-zinc-700 disabled:opacity-40">Find bugs</button>
+                  <button disabled={busy} onClick={() => ask("explain")} className="ml-auto rounded-lg bg-zinc-800 px-2 py-0.5 hover:bg-zinc-700 disabled:opacity-40">Explain</button>
+                  <button disabled={busy} onClick={() => ask("bugs")} className="rounded-lg bg-zinc-800 px-2 py-0.5 hover:bg-zinc-700 disabled:opacity-40">Find bugs</button>
                 </div>
                 <pre className="min-h-0 flex-1 overflow-auto p-2 text-xs leading-5" data-testid="file-view">
                   {lines.map((l, i) => <div key={i} className="flex"><span className="w-10 shrink-0 select-none pr-2 text-right text-zinc-600">{file.start + i}</span><span className="whitespace-pre">{l}</span></div>)}
@@ -177,10 +177,10 @@ export default function Code({ busy, setBusy }: { busy: boolean; setBusy: (b: bo
             ) : <div className="m-auto text-sm text-zinc-600">Select a file from the tree or search results.</div>}
           </div>
 
-          <div className="flex w-[30rem] max-w-[45%] shrink-0 flex-col">
+          <div className="flex min-h-96 w-full shrink-0 flex-col lg:min-h-0 lg:w-[30rem] lg:max-w-[45%]">
             <div className="flex border-b border-zinc-800 text-sm">
               {(["assistant", "changes"] as const).map((t) => (
-                <button key={t} onClick={() => setPanel(t)} className={`flex-1 py-1.5 ${panel === t ? "border-b-2 border-orange-500 text-white" : "text-zinc-500"}`}>
+                <button key={t} onClick={() => setPanel(t)} className={`flex-1 py-1.5 ${panel === t ? "border-b-2 border-orange-500 text-zinc-50" : "text-zinc-500 hover:text-zinc-300"}`}>
                   {t === "assistant" ? "Assistant" : `Changes${history.some((h) => h.status === "pending") ? " ●" : ""}`}
                 </button>
               ))}
@@ -193,9 +193,9 @@ export default function Code({ busy, setBusy }: { busy: boolean; setBusy: (b: bo
                 </div>
                 <div className="flex gap-2 border-t border-zinc-800 p-2">
                   <input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === "Enter" && question.trim() && ask("ask")} placeholder="Ask about this project…" aria-label="Project question"
-                    className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm" />
-                  {busy ? <button onClick={() => abortRef.current?.abort()} className="rounded bg-red-600 px-3 text-sm">■ Stop</button>
-                    : <button onClick={() => ask("ask")} disabled={!question.trim()} className="rounded bg-orange-600 px-3 text-sm disabled:opacity-40">Ask</button>}
+                    className="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-sm" />
+                  {busy ? <button onClick={() => abortRef.current?.abort()} className="rounded-lg bg-red-600 text-white px-3 text-sm">Stop</button>
+                    : <button onClick={() => ask("ask")} disabled={!question.trim()} className="rounded ember-bg text-white px-3 text-sm disabled:opacity-40">Ask</button>}
                 </div>
               </div>
             ) : (
@@ -204,8 +204,8 @@ export default function Code({ busy, setBusy }: { busy: boolean; setBusy: (b: bo
                   <div className="text-xs text-zinc-500">Propose a change to {file ? <span className="font-mono">{file.path}</span> : "the open file"} — nothing is written until you approve.</div>
                   <div className="flex gap-2">
                     <input value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="Describe the change…" aria-label="Change instruction"
-                      className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm" />
-                    <button onClick={propose} disabled={busy || !file} className="rounded bg-orange-600 px-3 text-sm disabled:opacity-40">Propose</button>
+                      className="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-sm" />
+                    <button onClick={propose} disabled={busy || !file} className="rounded ember-bg text-white px-3 text-sm disabled:opacity-40">Propose</button>
                   </div>
                   {working && <div className="animate-pulse text-xs text-zinc-500">{working}</div>}
                 </div>
@@ -218,7 +218,7 @@ export default function Code({ busy, setBusy }: { busy: boolean; setBusy: (b: bo
                         {patch.is_new_file && <span className="text-xs text-sky-400">new file</span>}
                       </div>
                       {patch.meta && (
-                        <div className="mb-2 rounded border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-400" data-testid="patch-meta">
+                        <div className="mb-2 rounded-lg border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-400" data-testid="patch-meta">
                           <div>Strategy: <b className="text-zinc-300">{patch.meta.strategy}</b> · attempts: <b className="text-zinc-300">{patch.meta.attempts}</b></div>
                           {patch.meta.checks.map((c) => <div key={c.name}>{c.ok ? "✓" : c.ok === false ? "✗" : "–"} {c.name.replace(/_/g, " ")}{c.detail ? ` (${c.detail})` : ""}</div>)}
                           {(patch.meta.attempt_log ?? []).filter((a) => !a.ok).map((a) => <div key={a.n} className="text-amber-300">retry {a.n}: {a.error}</div>)}
@@ -227,10 +227,10 @@ export default function Code({ busy, setBusy }: { busy: boolean; setBusy: (b: bo
                       <DiffView rows={patch.rows} />
                       <div className="mt-2 flex gap-2">
                         {patch.status === "pending" && <>
-                          <button onClick={() => act(codeApi.apply, patch.id)} className="rounded bg-emerald-600 px-3 py-1 text-sm hover:bg-emerald-500">Approve &amp; apply</button>
-                          <button onClick={() => act(codeApi.reject, patch.id)} className="rounded border border-zinc-600 px-3 py-1 text-sm hover:bg-zinc-800">Reject</button>
+                          <button onClick={() => act(codeApi.apply, patch.id)} className="rounded-lg bg-emerald-600 text-white px-3 py-1 text-sm hover:brightness-110">Approve &amp; apply</button>
+                          <button onClick={() => act(codeApi.reject, patch.id)} className="rounded-lg border border-zinc-600 px-3 py-1 text-sm hover:bg-zinc-800">Reject</button>
                         </>}
-                        {patch.status === "applied" && <button onClick={() => act(codeApi.rollback, patch.id)} className="rounded border border-sky-600 px-3 py-1 text-sm text-sky-300 hover:bg-zinc-800">Roll back</button>}
+                        {patch.status === "applied" && <button onClick={() => act(codeApi.rollback, patch.id)} className="rounded-lg border border-sky-600 px-3 py-1 text-sm text-sky-300 hover:bg-zinc-800">Roll back</button>}
                       </div>
                       {patch.note && <div className="mt-1 text-xs text-red-400">{patch.note}</div>}
                     </div>

@@ -22,7 +22,7 @@ const result = { backend_idle: backendMem() };
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await (await browser.newContext()).newPage();
 await page.goto(URL);
-await page.getByText(/ready/).first().waitFor();
+await page.getByLabel("Message").waitFor();
 await new Promise((r) => setTimeout(r, 2000));
 result.edge_chat_view = edgeMem();
 await page.getByRole("tab", { name: "Code" }).click();

@@ -42,7 +42,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 try {
   await page.goto(URL);
   await page.getByRole("tab", { name: "Code" }).click();
-  check("Code view opens with authorize prompt", await page.getByText(/Authorize a project folder/).isVisible());
+  check("Code view opens (lazy chunk) with authorize prompt", await page.getByText(/Authorize a project folder/).waitFor({ timeout: 10000 }).then(() => true, () => false));
 
   // authorization + safety
   await page.getByLabel("Folder path").fill(path.join(root, "does-not-exist"));

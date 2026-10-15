@@ -368,3 +368,38 @@ async def test_ollama_keep_alive_option_becomes_top_level_field():
     async for _ in p.chat_stream("m", [{"role": "user", "content": "hi"}], {"num_ctx": 2048, "keep_alive": "5m"}, 5):
         pass
     assert seen["keep_alive"] == "5m"
+
+
+# ---------------------------------------------------------------- Wikimedia policy (Phase G, part 1)
+WIKI_HIT = [{"title": "Prime Minister of Japan", "snippet": "The <span>prime minister</span> of Japan is the head of government"}]
+
+
+def _wiki_chat(tmp_path, **settings):
+    c, _, web = make_app(tmp_path, ddg_results=[], wiki=WIKI_HIT, pages={"en.wikipedia.org": PM_PAGE})
+    c.put("/api/settings", json={"web_mode": "always", **settings})
+    src = next(e for e in chat(c, "prime minister of Japan") if e["type"] == "sources")["sources"][0]
+    return src, web
+
+
+def test_wikipedia_pages_default_to_snippets_only(tmp_path):
+    src, web = _wiki_chat(tmp_path)
+    assert src["fetched"] is False
+    assert not any("/wiki/" in u for u in web.log)                      # the article page was never requested
+
+
+def test_wikipedia_pages_need_contact_even_when_enabled(tmp_path):
+    src, web = _wiki_chat(tmp_path, wikimedia_pages=True)
+    assert src["fetched"] is False and not any("/wiki/" in u for u in web.log)
+
+
+def test_wikipedia_pages_allowed_only_with_optin_and_contact(tmp_path):
+    src, web = _wiki_chat(tmp_path, wikimedia_pages=True, web_contact="ops@example.org")
+    assert src["fetched"] is True and any("/wiki/" in u for u in web.log)
+
+
+def test_policy_gate_covers_wikimedia_family_only():
+    wc = web_client()
+    assert wc.wikimedia_page_blocked("https://en.wikipedia.org/wiki/X")
+    assert wc.wikimedia_page_blocked("https://commons.wikimedia.org/wiki/X")
+    assert wc.wikimedia_page_blocked("https://news.test/pm") is None
+    assert wc.wikimedia_page_blocked("https://notwikipedia.org/x") is None

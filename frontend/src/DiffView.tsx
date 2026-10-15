@@ -19,7 +19,7 @@ export default function DiffView({ rows }: { rows: DiffRow[] }) {
     } else { out.push(<Row key={i} r={rows[i]} />); i++; }
   }
   return (
-    <div className="overflow-auto rounded border border-zinc-700 text-xs" data-testid="diff">
+    <div className="overflow-auto rounded-xl border border-zinc-700 text-xs" data-testid="diff">
       <table className="w-full table-fixed border-collapse font-mono">
         <colgroup><col className="w-10" /><col /><col className="w-10" /><col /></colgroup>
         <tbody>{out}</tbody>

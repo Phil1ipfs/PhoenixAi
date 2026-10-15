@@ -25,6 +25,8 @@ DEFAULT_SETTINGS = {
     "web_max_sources": 3,
     "web_timeout_s": 8,
     "web_contact": "",          # optional email/URL added to the User-Agent (Wikimedia asks bots to identify an operator)
+    "wikimedia_pages": False,   # full Wikipedia page reads: opt-in, and only works when web_contact is also set
+    "doc_context_chars": 3000,  # characters of retrieved document excerpts sent to the model per question (prompt speed is ~28 tok/s)
     "keep_alive": "5m",         # how long Ollama keeps the model in RAM after a reply ("0" = unload immediately)
     "num_thread": 0,            # 0 = let Ollama decide
     "memory_guard": True,
@@ -56,6 +58,27 @@ CREATE TABLE IF NOT EXISTS patches (
 CREATE TABLE IF NOT EXISTS benchmarks (
     id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT NOT NULL, results TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
+    status TEXT NOT NULL, detail TEXT, pages INTEGER, chars INTEGER NOT NULL DEFAULT 0, chunk_count INTEGER NOT NULL DEFAULT 0,
+    warnings TEXT, meta TEXT, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_files_sha ON files(sha256);
+CREATE TABLE IF NOT EXISTS file_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE, idx INTEGER NOT NULL,
+    loc TEXT NOT NULL, section TEXT, page_start INTEGER, page_end INTEGER, line_start INTEGER, line_end INTEGER, text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_file ON file_chunks(file_id, idx);
+CREATE TABLE IF NOT EXISTS conversation_files (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE, attached_at TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, file_id)
+);
+CREATE TABLE IF NOT EXISTS message_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    file_id TEXT, name TEXT NOT NULL, kind TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mf_msg ON message_files(message_id);
 """
 
 
@@ -142,9 +165,15 @@ class Database:
 
     def list_messages(self, cid: str) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY id", (cid,)).fetchall()
+        files: dict[int, list[dict]] = {}
+        for f in self.conn.execute("SELECT mf.message_id, mf.file_id, mf.name, mf.kind FROM message_files mf "
+                                   "JOIN messages m ON m.id=mf.message_id WHERE m.conversation_id=? ORDER BY mf.id", (cid,)):
+            files.setdefault(f["message_id"], []).append({"file_id": f["file_id"], "name": f["name"], "kind": f["kind"],
+                                                          "removed": f["file_id"] is None})
         return [
             {"id": r["id"], "role": r["role"], "content": r["content"], "model": r["model"],
-             "metrics": json.loads(r["metrics"]) if r["metrics"] else None, "created_at": r["created_at"]}
+             "metrics": json.loads(r["metrics"]) if r["metrics"] else None, "created_at": r["created_at"],
+             **({"files": files[r["id"]]} if r["id"] in files else {})}
             for r in rows
         ]
 

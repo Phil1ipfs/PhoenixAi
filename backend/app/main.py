@@ -10,21 +10,26 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import research, sysinfo
+from . import research, sysinfo, verify
 from .chat import auto_title, build_messages
 from .db import DEFAULT_SETTINGS, Database
 from .benchmark_routes import register_benchmark
 from .patch_routes import register_patches
 from .workspace_routes import register_workspace
+from .phoenix_files import qa
+from .phoenix_files.routes import register_files
+from .phoenix_files.store import FileStore
 from .providers import ModelProvider, OllamaProvider, ProviderError
 
 DATA_DIR = Path(os.environ.get("PHOENIX_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}  # "testserver" is Starlette's TestClient host
 LOCAL_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8000", "http://localhost:8000"]
 
 
@@ -42,6 +47,8 @@ class SettingsUpdate(BaseModel):
     web_mode: str | None = Field(None, pattern="^(off|auto|always)$")
     web_max_sources: int | None = Field(None, ge=1, le=6)
     web_timeout_s: int | None = Field(None, ge=2, le=30)
+    doc_context_chars: int | None = Field(None, ge=500, le=12000)
+    wikimedia_pages: bool | None = None
     web_contact: str | None = Field(None, max_length=200, pattern=r"^[^\r\n]*$")
     keep_alive: str | None = Field(None, pattern=r"^(-1|\d+[smh]?)$")
     num_thread: int | None = Field(None, ge=0, le=32)
@@ -62,6 +69,36 @@ class ConversationPatch(BaseModel):
 class SendMessage(BaseModel):
     content: str = Field(..., min_length=1, max_length=50000)
     model: str | None = None
+    file_ids: list[str] = Field(default_factory=list, max_length=8)   # documents attached with this message
+
+
+def is_local_url(url: str) -> bool:
+    """True only for http(s) URLs whose real host is loopback (a prefix check accepts http://127.0.0.1.evil.com)."""
+    try:
+        p = urlsplit(url)
+        return p.scheme in ("http", "https") and p.username is None and p.hostname in ("127.0.0.1", "localhost", "::1")
+    except ValueError:
+        return False
+
+
+class LocalOnlyMiddleware:
+    """CORS only stops a page from *reading* responses. These checks stop other websites from *causing* requests: a foreign
+    Host header (DNS rebinding) and a foreign Origin on a state-changing request (cross-site POST/PUT/DELETE, including
+    text/plain uploads that need no preflight). Non-browser clients send no Origin and are unaffected.
+    Pure ASGI (not @app.middleware) so streamed replies and client-abort cancellation (the Stop button) are untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            h = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+            origin = h.get("origin")
+            if urlsplit("//" + h.get("host", "")).hostname not in LOCAL_HOSTS:
+                return await JSONResponse({"detail": "Requests must use a localhost address"}, status_code=403)(scope, receive, send)
+            if origin is not None and scope["method"] not in ("GET", "HEAD", "OPTIONS") and not is_local_url(origin):
+                return await JSONResponse({"detail": "Cross-site requests are not allowed"}, status_code=403)(scope, receive, send)
+        await self.app(scope, receive, send)
 
 
 def ndjson(obj: dict) -> str:
@@ -71,6 +108,7 @@ def ndjson(obj: dict) -> str:
 def create_app(db_path: Path | str | None = None, provider: ModelProvider | None = None,
                web: research.WebClient | None = None) -> FastAPI:
     db = Database(db_path or DATA_DIR / "phoenix.db")
+    file_store = FileStore(db)
     state = {"provider": provider or OllamaProvider(db.get_settings()["ollama_url"]), "custom": provider is not None}
     web_holder: dict = {"client": web, "injected": web is not None}
     gen_lock = asyncio.Lock()  # one generation at a time: protects RAM on a 12 GB machine
@@ -85,6 +123,8 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
 
     app = FastAPI(title="PHOENIX AI", version="1.0.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=LOCAL_ORIGINS, allow_methods=["*"], allow_headers=["*"])
+
+    app.add_middleware(LocalOnlyMiddleware)
     app.state.db = db
     app.state.get_provider = lambda: state["provider"]
 
@@ -135,7 +175,7 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
         changes = body.model_dump(exclude_none=True)
         if "ollama_url" in changes:
             url = changes["ollama_url"].rstrip("/")
-            if not url.startswith(("http://127.0.0.1", "http://localhost")):
+            if not is_local_url(url):
                 raise HTTPException(400, "ollama_url must be a local address (127.0.0.1 or localhost)")
             changes["ollama_url"] = url
             if not state["custom"]:
@@ -174,15 +214,21 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
 
     @app.delete("/api/conversations/{cid}", status_code=204)
     async def delete_conversation(cid: str):
+        for fid in file_store.exclusive_files(cid):   # uploads that belong only to this conversation go with it
+            file_store.delete(fid)
         if not db.delete_conversation(cid):
             raise HTTPException(404, "Conversation not found")
 
     # ---------------- chat (streaming NDJSON)
     def get_web(s: dict) -> research.WebClient:
-        key = (s["web_timeout_s"], s["web_contact"])
+        key = (s["web_timeout_s"], s["web_contact"], s["wikimedia_pages"])
         if web_holder["client"] is None or (web_holder.get("key") not in (None, key) and not web_holder.get("injected")):
-            web_holder["client"] = research.WebClient(timeout=s["web_timeout_s"], contact=s["web_contact"])
-        web_holder["key"] = web_holder.get("key") or key
+            web_holder["client"] = research.WebClient(timeout=s["web_timeout_s"], contact=s["web_contact"],
+                                                      wikimedia_pages=s["wikimedia_pages"])
+        elif web_holder.get("injected"):  # tests inject a client; settings still govern the Wikimedia policy switch
+            web_holder["client"].wikimedia_pages = s["wikimedia_pages"]
+            web_holder["client"].contact = s["web_contact"].strip()
+        web_holder["key"] = key
         return web_holder["client"]
 
     @app.post("/api/web/test")
@@ -204,12 +250,36 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
 
         s = db.get_settings()
         model = body.model or s["model"]
-        first = not db.list_messages(cid)
+        linked = []
+        for fid in dict.fromkeys(body.file_ids):
+            f = file_store.get(fid)
+            if not f:
+                raise HTTPException(404, f"Attached file not found: {fid}")
+            if not file_store.is_attached(cid, fid) and file_store.attachment_count(cid) >= 8:
+                raise HTTPException(409, "A conversation can have at most 8 attached files")
+            linked.append(f)
+        history_before = db.list_messages(cid)
+        first = not history_before
+        prev_q = next((m["content"] for m in reversed(history_before) if m["role"] == "user"), None)
         user_msg = db.add_message(cid, "user", body.content)
+        for f in linked:
+            file_store.attach(cid, f["id"])
+        if linked:
+            file_store.link_message(user_msg["id"], linked)
+            user_msg = {**user_msg, "files": [{"file_id": f["id"], "name": f["name"], "kind": f["kind"], "removed": False} for f in linked]}
         if first:
             db.update_conversation(cid, title=auto_title(body.content))
         db.update_conversation(cid, model=model)
         messages = build_messages(s["system_prompt"], db.list_messages(cid), s["max_prompt_chars"])
+
+        # ---- documents: attached files take priority over the web for questions about them
+        turn = qa.plan_turn(body.content, file_store.list(cid), file_store.index, s["doc_context_chars"], prev_q)
+        if turn["mode"] == "canned":
+            return canned_reply(cid, user_msg, model, turn["text"], {
+                "mode": "canned", "reason": turn["reason"],
+                "verification": {"verdict": "unverified", "label": "Unable to verify", "checks": {}, "reasons": [turn["text"][:120]]}})
+        if turn["mode"] in ("question", "summary"):
+            return document_turn(cid, user_msg, model, s, turn, body.content)
 
         # ---- evidence workflow: detect -> retrieve -> ground -> (after generation) verify citations
         det = research.needs_verification(body.content)
@@ -249,11 +319,14 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
                        "unverified_offline": "the web search failed: " + (web_meta.get("note") or "network unavailable"),
                        "unverified_no_results": "the search returned no usable results"}[web_meta["status"]]
                 add_system(msgs, research.UNVERIFIED_SYSTEM.format(why=why))
+                web_meta["verification"] = {"verdict": "unverified", "label": verify.LABELS["unverified"], "checks": {},
+                                            "reasons": ["time-sensitive question, but " + why]}
                 yield {"type": "warning", "message": "Not verified live: " + why}
             yield {"_result": (msgs, {"web": web_meta})}
 
         def post(text: str) -> str:
             if full_sources:
+                web_meta["verification"] = verify.check_answer(body.content, text, full_sources, time_sensitive=det["needed"])
                 cit = research.verify_citations(text, full_sources)
                 text = research.sanitize_answer(text, cit["invalid_ids"])
                 web_meta["citations"] = cit
@@ -262,6 +335,55 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
             return text
 
         return generate(cid, user_msg, messages, model, base_options(s), s, prepare=prepare, post=post)
+
+    def canned_reply(cid: str, user_msg: dict, model: str, text: str, docs_meta: dict) -> StreamingResponse:
+        """A deterministic assistant reply (no model call), e.g. 'this PDF is scanned' or 'nothing matched in the document'."""
+        async def stream() -> AsyncIterator[str]:
+            async with gen_lock:
+                yield ndjson({"type": "start", "user_message": user_msg, "model": model})
+                yield ndjson({"type": "token", "content": text})
+                msg = db.add_message(cid, "assistant", text, model=model, metrics={"docs": docs_meta, "status": "complete", "canned": True})
+                yield ndjson({"type": "done", "message": msg})
+        return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+    def document_turn(cid: str, user_msg: dict, model: str, s: dict, turn: dict, question: str) -> StreamingResponse:
+        """Answer or summarise from retrieved excerpts of the attached documents (never the whole document)."""
+        summary = turn["mode"] == "summary"
+        budget = s["doc_context_chars"]
+        docs_meta: dict = {"mode": turn["mode"], "files": [{"id": f["id"], "name": f["name"], "kind": f["kind"]} for f in turn["files"]],
+                           "refs": [], "budget_chars": budget}
+        refs_full: list[dict] = []
+        history = db.list_messages(cid)[:-1]
+
+        async def prepare():
+            yield {"type": "status", "message": "Searching your documents…"}
+            if summary:
+                ids = turn["file_ids"]
+                by_file: dict[str, list[dict]] = {}
+                for c in file_store.chunks(ids):
+                    by_file.setdefault(c["file_id"], []).append(c)
+                prompt, refs, coverage = qa.build_summary_prompt(question, turn["files"], by_file,
+                                                                 {i: file_store.outline(i) for i in ids}, budget)
+                docs_meta["coverage"] = coverage
+            else:
+                chosen = qa.pick_chunks(turn["hits"], budget)
+                prompt, refs = qa.build_question_prompt(question, chosen)
+            refs_full.extend(refs)
+            docs_meta["refs"] = qa.public_refs(refs)
+            yield {"type": "documents", "refs": docs_meta["refs"], "mode": turn["mode"], "coverage": docs_meta.get("coverage")}
+            msgs = build_messages(s["system_prompt"] + (qa.SUMMARY_SYSTEM if summary else qa.DOC_SYSTEM), history,
+                                  max(1000, s["max_prompt_chars"] // 3))
+            msgs.append({"role": "user", "content": prompt})
+            yield {"_result": (msgs, {"docs": docs_meta})}
+
+        def post(text: str) -> str:
+            srcs = [{"id": r["id"], "title": f"{r['file_name']} {r['loc']}", "text": r["text"], "fetched": True} for r in refs_full]
+            ver = verify.check_answer(question, text, srcs, prefix="D", summary=summary)
+            docs_meta["verification"] = ver
+            return verify.sanitize_answer(text, ver["checks"]["source_validity"]["invalid_ids"])
+
+        options = base_options(s, num_ctx=max(s["num_ctx"], s["workspace_num_ctx"]))
+        return generate(cid, user_msg, [], model, options, s, prepare=prepare, post=post)
 
     def base_options(s: dict, **over) -> dict:
         o = {"num_ctx": s["num_ctx"], "temperature": s["temperature"], "num_predict": s["num_predict"],
@@ -359,6 +481,7 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
 
     ctx = SimpleNamespace(db=db, state=state, gen_lock=gen_lock, generate=generate, collect=collect,
                           base_options=base_options)
+    register_files(app, ctx, file_store)
     register_workspace(app, ctx)
     register_patches(app, ctx)
     register_benchmark(app, ctx)

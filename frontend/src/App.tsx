@@ -1,31 +1,30 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { api, streamMessage, type Conversation, type Health, type Message, type Settings, type WebMeta } from "./api";
-import Markdown from "./Markdown";
+import Composer from "./Composer";
+import EmptyState from "./EmptyState";
+import { IconArrowDown, IconMenu, IconSidebar } from "./Icons";
+import MessageView from "./MessageView";
 import SettingsPanel from "./SettingsPanel";
-import { SourceList, WebStatus, linkCitations } from "./Sources";
+import Sidebar, { type View } from "./Sidebar";
+import { useAppearance } from "./theme";
+import { Banner, IconButton } from "./ui";
 
 // Heavy views load on demand so the chat opens fast and uses less memory.
 const Code = lazy(() => import("./Code"));
 const Bench = lazy(() => import("./Bench"));
 
-type View = "chat" | "code" | "bench";
-
-function modelState(h: Health | null): { color: string; text: string } {
+/** Only problems are surfaced; a healthy model shows nothing (the model is managed in Settings). */
+function modelProblem(h: Health | null): { color: string; text: string } | null {
   if (!h) return { color: "bg-red-500", text: "Backend offline" };
   if (!h.ollama.connected) return { color: "bg-red-500", text: "Ollama offline" };
-  if (!h.model_installed) return { color: "bg-amber-500", text: `${h.active_model} not installed` };
-  const inMem = h.loaded?.some((m) => m.name === h.active_model);
-  return { color: "bg-emerald-500", text: `${h.active_model} ready${inMem ? " · in memory" : ""}` };
+  if (!h.model_installed) return { color: "bg-amber-500", text: "Selected model isn’t installed — choose one in Settings" };
+  return null;
 }
 
 function RamChip({ mb }: { mb: number | null | undefined }) {
   if (mb == null) return null;
-  const color = mb < 800 ? "text-red-400" : mb < 1500 ? "text-amber-400" : "text-zinc-500";
-  return <span className={`text-xs ${color}`} title="Free system RAM">{(mb / 1024).toFixed(1)} GB free</span>;
-}
-
-function Dots() {
-  return <span className="inline-flex gap-1" aria-label="working"><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-500" /><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-500 [animation-delay:150ms]" /><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-500 [animation-delay:300ms]" /></span>;
+  const color = mb < 800 ? "text-red-400" : mb < 1500 ? "text-amber-400" : "text-zinc-400";
+  return <span className={`hidden rounded-full border border-zinc-800 px-2.5 py-1 text-xs sm:inline ${color}`} title="Free system RAM">{(mb / 1024).toFixed(1)} GB free</span>;
 }
 
 export default function App() {
@@ -44,7 +43,12 @@ export default function App() {
   const [view, setView] = useState<View>(() => { try { return (localStorage.getItem("phoenix.view") as View) || "chat"; } catch { return "chat"; } });
   useEffect(() => { try { localStorage.setItem("phoenix.view", view); } catch { /* ignore */ } }, [view]);
   const abortRef = useRef<AbortController | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+  const theme = useAppearance();
+  const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem("phoenix.sidebar") === "collapsed"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem("phoenix.sidebar", collapsed ? "collapsed" : "open"); } catch { /* ignore */ } }, [collapsed]);
 
   const refreshHealth = useCallback(() => api.health().then(setHealth).catch(() => setHealth(null)), []);
   const refreshConvs = useCallback(() => api.conversations().then(setConvs).catch(() => {}), []);
@@ -56,22 +60,30 @@ export default function App() {
     return () => clearInterval(t);
   }, [refreshHealth, refreshConvs, refreshSettings]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [messages]);
+  // Follow the stream only while the reader is at the bottom; scrolling up pauses it.
+  useEffect(() => { const el = scrollRef.current; if (el && stickRef.current) el.scrollTop = el.scrollHeight; }, [messages]);
+  const onScroll = () => {
+    const el = scrollRef.current; if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stickRef.current = near; setAtBottom(near);
+  };
+  const toBottom = () => { const el = scrollRef.current; if (!el) return; stickRef.current = true; el.scrollTo({ top: el.scrollHeight, behavior: "smooth" }); };
 
   const open = async (id: string) => {
     if (busy) return;
-    setActiveId(id); setError(""); setNotices([]); setNavOpen(false);
+    setActiveId(id); setError(""); setNotices([]); setNavOpen(false); stickRef.current = true;
     try { setMessages((await api.conversation(id)).messages); } catch (e) { setError((e as Error).message); }
   };
 
   const newChat = async () => {
     if (busy) return;
+    setView("chat");
     const c = await api.createConversation();
     setActiveId(c.id); setMessages([]); setError(""); setNotices([]); setNavOpen(false); refreshConvs();
   };
 
   const remove = async (id: string) => {
-    if (busy || !confirm("Delete this conversation?")) return;
+    if (busy) return;
     await api.deleteConversation(id);
     if (id === activeId) { setActiveId(null); setMessages([]); }
     refreshConvs();
@@ -87,7 +99,7 @@ export default function App() {
     setError(""); setNotices([]); setStatusMsg("");
     let id = activeId;
     if (!id) { const c = await api.createConversation(); id = c.id; setActiveId(id); }
-    setInput(""); setBusy(true);
+    setInput(""); setBusy(true); stickRef.current = true;
     setMessages((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "" }]);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -123,115 +135,49 @@ export default function App() {
   };
 
   const stop = () => abortRef.current?.abort();
-  const ms = modelState(health);
+  const problem = modelProblem(health);
   const active = convs.find((c) => c.id === activeId);
   const lowRam = health?.memory.available_mb != null && health.memory.available_mb < 800;
 
   return (
-    <div className="flex h-full">
-      <aside className={`${navOpen ? "flex" : "hidden"} absolute inset-y-0 left-0 z-20 w-64 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 md:static md:flex`}>
-        <div className="p-3">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-lg font-bold tracking-wide text-orange-500">🔥 PHOENIX AI</div>
-            <button className="text-zinc-500 md:hidden" onClick={() => setNavOpen(false)} aria-label="Close menu">✕</button>
-          </div>
-          <div className="mb-3 flex gap-1 rounded-lg bg-zinc-900 p-1 text-xs" role="tablist">
-            {([["chat", "Chat"], ["code", "Code"], ["bench", "Benchmark"]] as const).map(([v, label]) => (
-              <button key={v} role="tab" aria-selected={view === v} onClick={() => { setView(v); setNavOpen(false); }}
-                className={`flex-1 rounded-md py-1 ${view === v ? "bg-zinc-700 font-medium text-white" : "text-zinc-400 hover:text-zinc-200"}`}>{label}</button>
-            ))}
-          </div>
-          {view === "chat" && <button onClick={newChat} disabled={busy} className="w-full rounded-md bg-orange-600 py-1.5 text-sm font-medium hover:bg-orange-500 disabled:opacity-50">+ New conversation</button>}
-        </div>
-        <nav className="flex-1 overflow-y-auto px-2" aria-label="Conversations" hidden={view !== "chat"}>
-          {convs.map((c) => (
-            <div key={c.id} onClick={() => open(c.id)} className={`group mb-0.5 flex cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-sm ${c.id === activeId ? "bg-zinc-800 text-white" : "text-zinc-300 hover:bg-zinc-900"}`}>
-              <span className="truncate" title={c.title}>{c.title}</span>
-              <button onClick={(e) => { e.stopPropagation(); remove(c.id); }} className="hidden text-zinc-500 hover:text-red-400 group-hover:block" title="Delete">✕</button>
-            </div>
-          ))}
-          {convs.length === 0 && <p className="px-2 text-xs text-zinc-600">No conversations yet.</p>}
-        </nav>
-        {view !== "chat" && <div className="flex-1 px-4 text-xs text-zinc-600">{view === "code" ? "Authorize a project, then explain, search and edit code. Edits always need your approval." : "Measure the selected model on fixed coding tasks."}</div>}
-        <div className="space-y-2 border-t border-zinc-800 p-3">
-          <div className="flex items-center gap-2 text-xs text-zinc-400" title={health?.ollama.error ?? ""}><span className={`h-2 w-2 shrink-0 rounded-full ${ms.color}`} /><span className="truncate">{ms.text}</span></div>
-          <button onClick={() => setShowSettings(true)} className="w-full rounded-md border border-zinc-700 py-1 text-sm hover:bg-zinc-800">⚙ Settings</button>
-        </div>
-      </aside>
+    <div className="relative flex h-full overflow-hidden">
+      <div className="ambient" aria-hidden="true"><i /><i /><i /></div>
+      <Sidebar collapsed={collapsed} convs={convs} activeId={activeId} view={view} busy={busy} open={navOpen}
+        problem={problem ? { ...problem, title: health?.ollama.error ?? problem.text } : null} themePref={theme.theme}
+        onView={(v) => { setView(v); setNavOpen(false); }} onNew={newChat} onOpen={open} onDelete={remove}
+        onSettings={() => { setShowSettings(true); setNavOpen(false); }} onClose={() => setNavOpen(false)} onTheme={theme.cycleTheme} />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-3 border-b border-zinc-800 px-4 py-2 text-sm">
-          <button className="text-zinc-400 md:hidden" onClick={() => setNavOpen(true)} aria-label="Open menu">☰</button>
-          <div className="min-w-0 flex-1 truncate font-medium text-zinc-200">{view === "chat" ? (active?.title ?? "New chat") : view === "code" ? "PHOENIX Code" : "Benchmark"}</div>
-          {view === "chat" && settings && (
-            <label className="flex items-center gap-1 text-xs text-zinc-400" title="Internet research">
-              🌐
-              <select aria-label="Web mode" value={settings.web_mode} onChange={(e) => setWebMode(e.target.value as Settings["web_mode"])} className="rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-1 text-xs">
-                <option value="off">Web: off</option><option value="auto">Web: auto</option><option value="always">Web: always</option>
-              </select>
-            </label>
-          )}
+      <div className="relative z-10 flex min-w-0 flex-1 flex-col">
+        <header className="glass flex h-12 shrink-0 items-center gap-2 border-b border-zinc-800 px-3 text-sm">
+          <button className="press flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 md:hidden" onClick={() => setNavOpen(true)} aria-label="Open menu"><IconMenu /></button>
+          <IconButton label={collapsed ? "Show sidebar" : "Hide sidebar"} onClick={() => setCollapsed((c) => !c)} className="max-md:hidden"><IconSidebar /></IconButton>
+          <div className="min-w-0 flex-1 truncate font-medium text-zinc-100">{view === "chat" ? (active?.title ?? "New chat") : view === "code" ? "PHOENIX Code" : "Benchmark"}</div>
           <RamChip mb={health?.memory.available_mb} />
         </header>
-        {lowRam && <div role="status" className="border-b border-amber-800/50 bg-amber-950/40 px-4 py-1 text-xs text-amber-200">Low free memory ({health?.memory.available_mb} MB). Replies may be slow — close other apps or set “Keep model in RAM” to unload in Settings.</div>}
+        {lowRam && <div role="status" className="border-b border-amber-800/50 bg-amber-950/40 px-4 py-1.5 text-xs text-amber-200">Low free memory ({health?.memory.available_mb} MB). Replies may be slow — close other apps or set “Keep model in RAM” to unload in Settings.</div>}
 
-        <Suspense fallback={<div className="m-auto text-sm text-zinc-500">Loading…</div>}>
+        <Suspense fallback={<div className="mx-auto w-full max-w-3xl space-y-3 p-6" role="status" aria-label="Loading"><div className="skeleton h-5 w-1/3" /><div className="skeleton h-24 w-full" /><div className="skeleton h-24 w-full" /></div>}>
           {view === "code" && <Code busy={busy} setBusy={setBusy} />}
           {view === "bench" && <Bench busy={busy} setBusy={setBusy} />}
         </Suspense>
 
-        <main className={`min-h-0 flex-1 flex-col ${view === "chat" ? "flex" : "hidden"}`}>
-          <div className="flex-1 overflow-y-auto">
-            <div className="mx-auto max-w-3xl space-y-5 px-4 py-6">
-              {messages.length === 0 && (
-                <div className="mt-20 text-center text-zinc-500">
-                  <div className="text-4xl">🔥</div>
-                  <p className="mt-3 text-base text-zinc-300">What are we building?</p>
-                  <p className="mt-1 text-sm">Runs locally on your machine. Turn on <b>Web: auto</b> to verify time-sensitive questions against live sources.</p>
-                  {health && !health.ollama.connected && <p className="mt-3 text-red-400">Ollama isn’t reachable. Start it, then reload.</p>}
-                </div>
-              )}
-              {messages.map((m, i) => {
-                const last = i === messages.length - 1;
-                const web = m.metrics?.web;
-                return (
-                  <div key={m.id ?? `t${i}`} className={m.role === "user" ? "flex justify-end" : ""}>
-                    <div className={m.role === "user" ? "max-w-[85%] whitespace-pre-wrap rounded-2xl bg-zinc-800 px-4 py-2 leading-relaxed" : "w-full"}>
-                      {m.role === "assistant" && <div className="mb-1 text-xs font-semibold tracking-wide text-orange-500">PHOENIX</div>}
-                      {m.role === "user" ? m.content
-                        : m.content ? <Markdown text={linkCitations(m.content, web?.sources)} />
-                        : busy && last ? <span className="flex items-center gap-2 text-sm text-zinc-500"><Dots />{statusMsg || "Thinking… (the first reply can take a while while the model loads)"}</span> : null}
-                      {m.role === "assistant" && <SourceList web={web} />}
-                      {m.role === "assistant" && !(busy && last) && <WebStatus web={web} />}
-                      {m.role === "assistant" && m.metrics?.tokens_per_sec !== undefined && (
-                        <div className="mt-1 text-xs text-zinc-600">
-                          {m.model} · {m.metrics.tokens_per_sec ?? "?"} tok/s · {((m.metrics.wall_ms ?? 0) / 1000).toFixed(1)}s{m.metrics.status === "stopped" ? " · stopped" : ""}
-                        </div>
-                      )}
-                      {m.role === "assistant" && m.metrics?.status === "stopped" && m.metrics?.tokens_per_sec === undefined && <div className="mt-1 text-xs text-zinc-600">{m.model} · stopped</div>}
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={bottomRef} />
+        <main className={`relative min-h-0 flex-1 flex-col ${view === "chat" ? "flex" : "hidden"}`}>
+          <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto">
+            <div className="mx-auto max-w-3xl space-y-6 px-4 py-6">
+              {messages.length === 0 && <EmptyState health={health} onPick={setInput} />}
+              {messages.map((m, i) => <MessageView key={m.id ?? `t${i}`} m={m} last={i === messages.length - 1} busy={busy} statusMsg={statusMsg} />)}
             </div>
           </div>
-          <div className="mx-auto w-full max-w-3xl space-y-1 px-4">
-            {notices.map((n, i) => <div key={i} role="status" className="rounded-md bg-amber-950/40 px-3 py-1 text-xs text-amber-200">⚠ {n}</div>)}
-            {error && <div role="alert" className="rounded-md bg-red-950/40 px-3 py-1 text-sm text-red-300">⚠ {error}{/low_memory|out_of_memory/.test(error) ? " — try closing other applications." : ""}</div>}
-          </div>
-          <div className="border-t border-zinc-800 p-3">
-            <div className="mx-auto flex max-w-3xl gap-2">
-              <textarea
-                value={input} onChange={(e) => setInput(e.target.value)} rows={2} placeholder="Message PHOENIX… (Enter to send, Shift+Enter for newline)"
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-orange-600"
-              />
-              {busy
-                ? <button onClick={stop} className="rounded-lg bg-red-600 px-4 text-sm font-medium hover:bg-red-500">■ Stop</button>
-                : <button onClick={send} disabled={!input.trim()} className="rounded-lg bg-orange-600 px-4 text-sm font-medium hover:bg-orange-500 disabled:opacity-40">Send</button>}
+          {!atBottom && messages.length > 0 && (
+            <button onClick={toBottom} aria-label="Scroll to latest" className="glass pop absolute bottom-28 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-zinc-700 text-zinc-300 shadow-lg transition hover:bg-zinc-800"><IconArrowDown size={16} /></button>
+          )}
+          {(notices.length > 0 || error) && (
+            <div className="mx-auto w-full max-w-3xl space-y-1.5 px-4">
+              {notices.map((n, i) => <Banner key={i} tone="warn" onDismiss={() => setNotices((l) => l.filter((_, j) => j !== i))}>{n}</Banner>)}
+              {error && <Banner tone="error" onDismiss={() => setError("")}>{error}{/low_memory|out_of_memory/.test(error) ? " — try closing other applications." : ""}</Banner>}
             </div>
-          </div>
+          )}
+          <Composer value={input} busy={busy} webMode={settings?.web_mode} onChange={setInput} onSend={send} onStop={stop} onWebMode={setWebMode} />
         </main>
       </div>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onSaved={() => { refreshHealth(); refreshSettings(); }} />}

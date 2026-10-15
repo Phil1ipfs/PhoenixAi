@@ -100,6 +100,31 @@ def test_settings_validation_and_local_only(tmp_path):
     assert c.put("/api/settings", json={"temperature": 0.5}).json()["temperature"] == 0.5
 
 
+def test_ollama_url_rejects_lookalike_hosts(tmp_path):
+    c, _ = make(tmp_path)
+    for bad in ("http://127.0.0.1.evil.com", "http://localhost.evil.com:11434", "http://localhost@evil.com",
+                "http://127.0.0.1:11434@evil.com", "ftp://127.0.0.1", "http://[::2]:11434"):
+        assert c.put("/api/settings", json={"ollama_url": bad}).status_code == 400, bad
+    for good in ("http://127.0.0.1:11434/", "http://localhost:11434", "http://[::1]:11434"):
+        assert c.put("/api/settings", json={"ollama_url": good}).status_code == 200, good
+
+
+def test_rejects_foreign_host_and_cross_site_writes(tmp_path):
+    c, _ = make(tmp_path)
+    # DNS rebinding: attacker's domain resolves to 127.0.0.1, so the browser sends that domain as Host
+    assert c.get("/api/settings", headers={"Host": "evil.example.com:8000"}).status_code == 403
+    assert c.get("/api/settings", headers={"Host": "127.0.0.1:8000"}).status_code == 200
+    assert c.get("/api/settings", headers={"Host": "[::1]:8000"}).status_code == 200
+    # cross-site writes, incl. a text/plain body that needs no CORS preflight
+    for hdr in ({"Origin": "https://evil.example.com"}, {"Origin": "null"}, {"Origin": "http://127.0.0.1.evil.com"}):
+        assert c.post("/api/conversations", content=b"{}", headers={**hdr, "Content-Type": "text/plain"}).status_code == 403, hdr
+        assert c.put("/api/settings", json={"temperature": 1}, headers=hdr).status_code == 403, hdr
+    assert c.get("/api/conversations").status_code == 200
+    # the real UI (same origin and Vite dev server) and non-browser clients still work
+    for hdr in ({"Origin": "http://127.0.0.1:8000"}, {"Origin": "http://localhost:5173"}, {}):
+        assert c.post("/api/conversations", headers=hdr).status_code == 201, hdr
+
+
 def test_persistence_across_reopen(tmp_path):
     db = Database(tmp_path / "p.db")
     cid = db.create_conversation("m")["id"]

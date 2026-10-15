@@ -35,10 +35,10 @@ try {
     await page.getByRole("button", { name: "Send" }).waitFor({ timeout: 20000 });
   };
   await page.goto(URL);
-  await page.getByText(/ready/).first().waitFor();
+  await page.getByLabel("Message").waitFor();
 
   // ---- web OFF: time-sensitive question must be flagged unverified (deterministic banner, not model text)
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await ask("Who is the current prime minister of Japan?");
   check("web off: unverified banner shown for time-sensitive question", await page.getByText(/internet access is off/).isVisible());
   check("web off: no sources list", (await page.getByTestId("sources").count()) === 0);
@@ -46,7 +46,7 @@ try {
 
   // ---- web AUTO: sources, clickable citation, status
   await page.getByLabel("Web mode").selectOption("auto");
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await ask("Who is the current prime minister of Japan?");
   const link = page.getByTestId("sources").getByRole("link", { name: /Prime Minister of Japan/ });
   check("web auto: source link displayed with real URL", (await link.getAttribute("href")) === "https://news.test/pm");
@@ -58,25 +58,25 @@ try {
   await page.screenshot({ path: path.join(shots, "web-auto.png") });
 
   // ---- fabricated citation is stripped and flagged
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await ask("Who is the current prime minister of Japan? fabricate-test");
   const body = await page.locator(".md").last().innerText();
   check("fabricated [9] citation removed from displayed answer", !body.includes("[9]") && /unverified citation removed/.test(body));
   check("warning shown for invalid citation", await page.getByText(/couldn.t be matched|invalid citation/).isVisible());
 
   // ---- offline fallback
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await ask("Who is the current prime minister of Japan? offline-test");
   check("offline: honest 'couldn't verify live' banner", await page.getByText(/Couldn.t verify live/).first().isVisible());
   check("offline: chat still answered", (await page.locator(".md").last().innerText()).includes("could not verify"));
 
   // ---- timeless question in auto mode: no web UI at all
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await ask("Explain quicksort");
   check("timeless question: no sources and no banner", (await page.getByTestId("sources").count()) === 0 && (await page.getByText(/Cited from|Couldn.t verify|internet access is off/).count()) === 0);
 
   // ---- settings panel
-  await page.getByText("⚙ Settings").click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("Internet access").waitFor();
   check("settings: model select present", await page.getByLabel(/Model \(installed/).isVisible());
   check("settings: shows web mode auto", (await page.getByLabel("Internet access").inputValue()) === "auto");
@@ -117,9 +117,10 @@ try {
   await page.setViewportSize({ width: 390, height: 800 });
   await sleep(300);
   check("mobile: no horizontal overflow", await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
-  check("mobile: sidebar collapsed, menu button visible", (await page.getByLabel("Open menu").isVisible()) && !(await page.getByText("+ New conversation").isVisible()));
+  check("mobile: sidebar collapsed, menu button visible", (await page.getByLabel("Open menu").isVisible()) && !(await page.getByRole("button", { name: "New chat" }).isVisible()));
   await page.getByLabel("Open menu").click();
-  check("mobile: menu opens", await page.getByText("+ New conversation").isVisible());
+  await sleep(350); // sidebar slide-in transition
+  check("mobile: menu opens", await page.getByRole("button", { name: "New chat" }).isVisible());
   await page.screenshot({ path: path.join(shots, "mobile.png") });
   await ctx.close();
 

@@ -1,19 +1,41 @@
 import { useEffect, useState } from "react";
 import { api, type ModelInfo, type Settings } from "./api";
+import { useAppearance, type Accent, type ThemePref } from "./theme";
+import { Sheet, btnGhost, btnPrimary, inputCls } from "./ui";
 
-export function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/60" onClick={onClose}>
-      <div role="dialog" aria-label="Settings" className="max-h-[90vh] w-[620px] max-w-[95vw] overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-950 p-5" onClick={(e) => e.stopPropagation()}>{children}</div>
-    </div>
-  );
-}
-
-const field = "w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm outline-none focus:border-orange-600";
-const lbl = "mb-1 block text-xs text-zinc-400";
+const field = inputCls;
+const lbl = "mb-1 block text-xs font-medium text-zinc-400";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return <fieldset className="mt-4 border-t border-zinc-800 pt-3"><legend className="pr-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">{title}</legend>{children}</fieldset>;
+  return <fieldset className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 pt-2"><legend className="px-2 text-xs font-semibold uppercase tracking-wider text-orange-500">{title}</legend>{children}</fieldset>;
+}
+
+const THEMES: { id: ThemePref; label: string }[] = [{ id: "system", label: "System" }, { id: "dark", label: "Dark" }, { id: "light", label: "Light" }];
+const ACCENTS: { id: Accent; label: string; css: string }[] = [
+  { id: "ember", label: "Ember", css: "linear-gradient(135deg,#ff5a1f,#ffa31a)" },
+  { id: "electric", label: "Electric", css: "linear-gradient(135deg,#3b82f6,#8b5cf6)" },
+  { id: "violet", label: "Violet", css: "linear-gradient(135deg,#8b5cf6,#d946ef)" },
+];
+
+function Appearance() {
+  const a = useAppearance();
+  return (
+    <Section title="Appearance">
+      <div className={lbl} id="s-theme-l">Theme</div>
+      <div role="radiogroup" aria-labelledby="s-theme-l" className="grid grid-cols-3 gap-1 rounded-xl bg-zinc-950/60 p-1">
+        {THEMES.map((t) => <button key={t.id} role="radio" aria-checked={a.theme === t.id} onClick={() => a.setTheme(t.id)}
+          className={`press rounded-lg py-1.5 text-sm ${a.theme === t.id ? "bg-zinc-800 text-zinc-50 shadow-sm" : "text-zinc-500 hover:text-zinc-200"}`}>{t.label}</button>)}
+      </div>
+      <div className={`${lbl} mt-3`} id="s-acc-l">Accent</div>
+      <div role="radiogroup" aria-labelledby="s-acc-l" className="flex gap-2">
+        {ACCENTS.map((c) => <button key={c.id} role="radio" aria-checked={a.accent === c.id} onClick={() => a.setAccent(c.id)}
+          className={`press flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-sm ${a.accent === c.id ? "border-orange-500 text-zinc-50" : "border-zinc-700 text-zinc-400 hover:text-zinc-200"}`}>
+          <span className="h-3.5 w-3.5 rounded-full" style={{ background: c.css }} />{c.label}</button>)}
+      </div>
+      <label className="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={a.ambient} onChange={(e) => a.setAmbient(e.target.checked)} /> Ambient background glow</label>
+      <p className="mt-1 text-xs text-zinc-500">Appearance is stored in this browser only. Animations are disabled automatically if your system asks for reduced motion.</p>
+    </Section>
+  );
 }
 
 export default function SettingsPanel({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
@@ -27,7 +49,7 @@ export default function SettingsPanel({ onClose, onSaved }: { onClose: () => voi
     api.settings().then(setS).catch((e) => setErr(String(e.message)));
     api.models().then((m) => { setModels(m.models); setLoaded(true); }).catch(() => { setLoaded(true); setErr("Could not list models (is Ollama running?)"); });
   }, []);
-  if (!s || !loaded) return <Modal onClose={onClose}>{err || "Loading…"}</Modal>;
+  if (!s || !loaded) return <Sheet title="Settings" onClose={onClose}>err ? <p role="alert" className="pt-5 text-sm text-red-400">{err}</p> : <div className="space-y-3 pt-5" role="status" aria-label="Loading settings"><div className="skeleton h-4 w-1/4" /><div className="skeleton h-20 w-full" /><div className="skeleton h-4 w-1/3" /><div className="skeleton h-32 w-full" /></div></Sheet>;
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setS({ ...s, [k]: v });
   const num = (k: keyof Settings) => (e: React.ChangeEvent<HTMLInputElement>) => set(k, Number(e.target.value) as never);
   const names = models.map((m) => m.name);
@@ -40,14 +62,19 @@ export default function SettingsPanel({ onClose, onSaved }: { onClose: () => voi
   };
   const testWeb = async () => {
     setWebTest("Testing…");
-    try { await api.saveSettings({ web_contact: s.web_contact, web_timeout_s: s.web_timeout_s }); const r = await api.webTest(); setWebTest(r.ok ? `✓ Reachable (${r.provider})` : `✗ ${r.error}`); }
+    try { await api.saveSettings({ web_contact: s.web_contact, web_timeout_s: s.web_timeout_s, wikimedia_pages: s.wikimedia_pages }); const r = await api.webTest(); setWebTest(r.ok ? `✓ Reachable (${r.provider})` : `✗ ${r.error}`); }
     catch (e) { setWebTest("✗ " + (e as Error).message); }
   };
   return (
-    <Modal onClose={onClose}>
-      <h2 className="text-lg font-semibold">Settings</h2>
+    <Sheet title="Settings" onClose={onClose} footer={<>
+      <button onClick={onClose} className={btnGhost}>Cancel</button>
+      <button onClick={save} className={btnPrimary}>Save</button>
+    </>}>
+
+      <Appearance />
 
       <Section title="Model">
+        <div className="mb-2 flex items-center gap-1.5 text-xs text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />Local · runs on this PC through Ollama (no cloud models configured)</div>
         <label htmlFor="s-model" className={lbl}>Model (installed in Ollama)</label>
         <select id="s-model" className={field} value={s.model} onChange={(e) => set("model", e.target.value)}>
           {!names.includes(s.model) && <option value={s.model}>{s.model} (not installed)</option>}
@@ -71,8 +98,9 @@ export default function SettingsPanel({ onClose, onSaved }: { onClose: () => voi
         </div>
         <label htmlFor="s-wc" className={`${lbl} mt-3`}>Web contact (optional email or URL)</label>
         <input id="s-wc" className={field} value={s.web_contact} placeholder="you@example.com" onChange={(e) => set("web_contact", e.target.value)} />
-        <p className="mt-1 text-xs text-zinc-500">Added to PHOENIX’s User-Agent. Wikipedia refuses requests that don’t identify an operator, so without this its pages can’t be read (only search snippets are used). Leave blank to stay anonymous.</p>
-        <div className="mt-2 flex items-center gap-3 text-sm"><button onClick={testWeb} className="rounded-md border border-zinc-700 px-3 py-1 hover:bg-zinc-800">Test connection</button><span className="text-xs text-zinc-400" data-testid="web-test">{webTest}</span></div>
+        <p className="mt-1 text-xs text-zinc-500">Added to PHOENIX’s User-Agent. Leave blank to stay anonymous: Wikipedia is then used for search snippets only. Wikimedia’s policy asks automated clients to identify an operator, so reading full Wikipedia pages needs both this contact and the switch below. PHOENIX never works around that restriction.</p>
+        <label className="mt-2 flex items-center gap-2 text-sm text-zinc-300"><input id="s-wiki" type="checkbox" checked={s.wikimedia_pages} onChange={(e) => set("wikimedia_pages", e.target.checked)} /> Allow reading full Wikipedia pages (requires a contact above; off by default)</label>
+        <div className="mt-2 flex items-center gap-3 text-sm"><button onClick={testWeb} className={btnGhost}>Test connection</button><span className="text-xs text-zinc-400" data-testid="web-test">{webTest}</span></div>
       </Section>
 
       <Section title="Generation">
@@ -99,15 +127,11 @@ export default function SettingsPanel({ onClose, onSaved }: { onClose: () => voi
           <div><label htmlFor="s-mf" className={lbl}>Warn below free RAM (MB)</label><input id="s-mf" className={field} type="number" value={s.min_free_mb} onChange={num("min_free_mb")} /></div>
           <label className="flex items-end gap-2 pb-1.5 text-sm"><input type="checkbox" checked={s.memory_guard} onChange={(e) => set("memory_guard", e.target.checked)} /> Memory guard</label>
         </div>
-        <div className="mt-3 flex items-center gap-3 text-sm"><button onClick={unload} className="rounded-md border border-zinc-700 px-3 py-1 hover:bg-zinc-800">Unload model now</button><span className="text-xs text-zinc-400" data-testid="unload-msg">{unloadMsg}</span></div>
+        <div className="mt-3 flex items-center gap-3 text-sm"><button onClick={unload} className={btnGhost}>Unload model now</button><span className="text-xs text-zinc-400" data-testid="unload-msg">{unloadMsg}</span></div>
         <p className="mt-1 text-xs text-zinc-500">Measured on this PC: the model holds ~2.1 GB; a context of 4096 costs only ~70 MB more than 2048. CPU thread count made no reliable difference (±10% noise), so it stays automatic.</p>
       </Section>
 
       {err && <p role="alert" className="mt-3 text-sm text-red-400">{err}</p>}
-      <div className="sticky -bottom-5 -mx-5 mt-5 flex justify-end gap-2 border-t border-zinc-800 bg-zinc-950 px-5 py-3">
-        <button onClick={onClose} className="rounded-md px-3 py-1.5 text-sm hover:bg-zinc-800">Cancel</button>
-        <button onClick={save} className="rounded-md bg-orange-600 px-4 py-1.5 text-sm font-medium hover:bg-orange-500">Save</button>
-      </div>
-    </Modal>
+    </Sheet>
   );
 }

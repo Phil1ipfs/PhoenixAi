@@ -28,10 +28,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 try {
   await page.goto(URL);
   await page.getByText("PHOENIX AI").first().waitFor();
-  await page.getByText(/ready/).waitFor({ timeout: 20000 }).then(() => check("status shows model ready", true), () => check("status shows model ready", false));
+  // The header no longer shows a model label; readiness is checked via the API and the absence of a problem banner.
+  const h = await (await fetch(URL + "/api/health")).json().catch(() => null);
+  check("model ready (API) and no status problem shown", !!h?.model_installed && (await page.getByRole("status").filter({ hasText: /offline|isn.t installed/ }).count()) === 0);
 
   // 1-2. send + streaming
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await msgBox.fill("Write a short Python function that reverses a string, in a fenced code block, then one sentence of explanation.");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByRole("button", { name: /Stop/ }).waitFor({ timeout: 10000 });
@@ -61,30 +63,31 @@ try {
   }
 
   // 7. persistence + switching + deletion
-  const title1 = (await page.locator("nav > div").first().innerText()).replace("✕", "").trim();
-  await page.getByText("+ New conversation").click();
+  const title1 = (await page.locator("[data-testid=conv-row]").first().innerText()).replace("✕", "").trim();
+  await page.getByRole("button", { name: "New chat" }).click();
   await sleep(500);
   check("new conversation clears chat", (await page.locator(".md").count()) === 0);
   await msgBox.fill("Say hi in one word.");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByText(/tok\/s/).first().waitFor({ timeout: 120000 });
   await page.getByRole("button", { name: "Send" }).waitFor({ timeout: 120000 });
-  const convCount = await page.locator("nav > div").count();
+  const convCount = await page.locator("[data-testid=conv-row]").count();
   check("two conversations listed", convCount >= 2, `count=${convCount}`);
-  await page.locator("nav > div", { hasText: title1.slice(0, 20) }).first().click();
+  await page.locator("[data-testid=conv-row]", { hasText: title1.slice(0, 20) }).first().click();
   await page.locator(".md pre code").first().waitFor({ timeout: 10000 });
   check("switching conversations loads its messages", true);
   await page.reload();
-  await page.locator("nav > div", { hasText: title1.slice(0, 20) }).first().click();
+  await page.locator("[data-testid=conv-row]", { hasText: title1.slice(0, 20) }).first().click();
   await page.locator(".md pre code").first().waitFor({ timeout: 10000 }).then(() => check("conversation persists after reload", true), () => check("conversation persists after reload", false));
-  const before = await page.locator("nav > div").count();
-  await page.locator("nav > div").first().hover();
-  await page.locator("nav > div").first().getByTitle("Delete").click();
+  const before = await page.locator("[data-testid=conv-row]").count();
+  await page.locator("[data-testid=conv-row]").first().hover();
+  await page.locator("[data-testid=conv-row]").first().getByTitle("Delete").click();
+  await page.locator("[data-testid=conv-row]").first().getByLabel("Confirm delete").click();
   await sleep(800);
-  check("delete removes a conversation", (await page.locator("nav > div").count()) === before - 1);
+  check("delete removes a conversation", (await page.locator("[data-testid=conv-row]").count()) === before - 1);
 
   // 5. Stop generation
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await msgBox.fill("Write a very long, detailed essay about the history of sorting algorithms with code for each.");
   await page.getByRole("button", { name: "Send" }).click();
   const t1 = Date.now();
@@ -96,18 +99,18 @@ try {
   await page.getByText(/stopped/).waitFor({ timeout: 10000 }).then(() => check("stopped reply saved and labelled", true), () => check("stopped reply saved and labelled", false));
 
   // 8. model switching in UI
-  await page.getByText("⚙ Settings").click();
+  await page.getByRole("button", { name: "Settings" }).click();
   const sel = page.getByLabel(/Model \(installed/);
   await page.waitForFunction(() => document.querySelectorAll("#s-model option").length >= 2); const opts = await sel.locator("option").allInnerTexts();
   check("settings lists installed models", opts.length >= 2, opts.join(" | "));
   await sel.selectOption({ label: opts.find((o) => o.startsWith("llama3.2:3b")) });
   await page.getByRole("button", { name: "Save" }).click();
-  await page.getByText("+ New conversation").click();
+  await page.getByRole("button", { name: "New chat" }).click();
   await msgBox.fill("Reply with just: PONG");
   await page.getByRole("button", { name: "Send" }).click();
   await page.getByText(/llama3\.2:3b · /).waitFor({ timeout: 360000 }).then(() => check("reply attributed to switched model (llama3.2:3b)", true), () => check("reply attributed to switched model", false));
   await page.getByRole("button", { name: "Send" }).waitFor({ timeout: 60000 });
-  await page.getByText("⚙ Settings").click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel(/Model \(installed/).selectOption({ label: (await page.locator("#s-model option").allInnerTexts()).find((o) => o.startsWith("qwen2.5-coder:3b")) });
   await page.getByRole("button", { name: "Save" }).click();
   check("model restored to qwen2.5-coder:3b", true);

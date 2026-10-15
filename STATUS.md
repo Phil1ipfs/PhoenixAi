@@ -1,46 +1,54 @@
-# STATUS (updated 2026-10-15)
+# STATUS (updated 2026-10-16)
 
 ## Verification summary
 | Layer | Result |
 |---|---|
-| Backend automated tests (`cd backend && .venv\Scripts\python -m pytest`) | **55 passed, 1 skipped** (symlink-escape test skipped: this Windows account cannot create symlinks) |
-| Browser test, chat (`e2e/ui.test.mjs`, real Edge via Playwright, real model) | 18/18 |
-| Browser test, PHOENIX Code (`e2e/code.test.mjs`) | 20/20 |
-| Browser test, benchmark tab (`e2e/bench.test.mjs`) | 3/3 |
-| Live benchmark, real model | 15 tasks, see BENCHMARKS.md |
+| Backend automated tests (`cd backend && .venv\Scripts\python -m pytest`) | **126 passed, 1 skipped** (symlink-escape test skipped: this Windows account can't create symlinks). No network or model needed; RAM is pinned in a fixture so tests don't depend on the machine. |
+| Deterministic UI tests (`e2e/fake.test.mjs`, scripted model + mocked web, real Edge) | **26/26** |
+| Real-model browser tests (`e2e/ui.test.mjs`, `code.test.mjs`, `bench.test.mjs`) | **18/18, 20/20, 3/3** (the chat suite failed 2 checks once while the laptop was heavily loaded, then passed 18/18; those two checks were made load-tolerant) |
+| Real-model benchmark, product defaults | 23/23 (see BENCHMARKS.md for caveats) |
+| Real-network research run | 4 questions; 3 cited and consistent with sources, 1 cited but unresponsive (BENCHMARKS.md) |
 
-Browser tests ran in **headless** Edge, started via `run.py` (the command inside `start-phoenix.bat`); the .bat itself was not double-clicked. Run them yourself: start the backend, then `cd e2e && node ui.test.mjs` (also `code.test.mjs`, `bench.test.mjs`; they use the real model and take a few minutes).
+Browser tests run in **headless** Edge via Playwright, with the backend started by `run.py` (what `start-phoenix.bat` runs); the .bat itself wasn't double-clicked. Reproduce: see README.
+
+## Phase F deliverables
+| Priority | State |
+|---|---|
+| 1 Internet research | **Implemented, optional, default off.** Free sources (DuckDuckGo HTML, Wikipedia API, Open-Meteo), robots/SSRF/size guards, clickable numbered sources, live-vs-memory distinction, graceful failure, on/off/auto setting. |
+| 2 Factual accuracy workflow | **Implemented**: detect -> retrieve -> ground -> verify citations -> deterministic unverified/offline banners. Tested for outdated-info, fabricated citations, unsupported claims, offline, no results. Limits below. |
+| 3 Coding-agent reliability | **Implemented and measured**: same 11 patch tasks 7/11 -> 11/11 (3 repeat runs), incl. 8 held-out. Python only; see caveats. |
+| 4 RAM/CPU | **Measured and optimized lightly** (keep_alive, unload, memory guard, lazy chunks, hidden-tab polling). Biggest finding: model ~2.1 GB; other apps dominate; prompt processing ~28 tok/s is the real context cost. |
+| 5 Interface | **Done**: header, message labels, source cards, status/loading text, grouped settings, responsive menu, polish from screenshot review. |
+| 6 Evaluation | **Done** as listed above. |
 
 ## Features
-### Implemented and verified (browser + API)
-Chat with streaming, Stop, history persistence, new/switch/delete conversations, markdown + syntax highlighting + Copy code, model selection/switching (verified with qwen2.5-coder:3b and llama3.2:3b), settings, connection status, error/loading states, performance metrics per reply.
-PHOENIX Code: authorize project folder, lazy file tree, file viewer, plain-text code search, file filter (glob), explain file, bug analysis, project Q&A with bounded context retrieval, source citations.
-Controlled editing: AI patch proposal (SEARCH/REPLACE), side-by-side diff, explicit approve/reject, atomic apply, conflict detection (file changed since proposal), change history, rollback (refuses if file changed after apply), new-file creation.
-Benchmark: 15 tasks in 4 categories, explicit execution consent, results saved per model.
+### Implemented and verified
+Everything from v1.0/1.1 (chat, streaming, Stop, persistence, model switching, PHOENIX Code, approvals/rollback, benchmark) plus: web research modes, citation verification, source links, symbol-based patch strategy with deterministic validation and retries, memory guard, keep_alive/unload, new settings, lazy-loaded views, deterministic UI suite.
 
-### Implemented but **not** verified
-- "Choose folder..." native dialog (tkinter subprocess): not exercised (headless test). Pasting a path is tested.
-- Symlink-escape protection: code exists, automated test skipped on this machine (it also never lists/traverses symlinks).
-- Behaviour under real out-of-memory: errors from Ollama are classified (`out_of_memory`) and shown, but I did not trigger a real OOM.
-- 7B models: not tested (not installed). Architecture has no 3B-specific code; only the model id changes.
+### Implemented but not verified in real life
+- Wikipedia page fetching with a contact set (needs your email/URL; mocked test only; without contact it correctly degrades to snippets).
+- Memory guard on a genuine out-of-memory event (only simulated); thresholds are heuristics.
+- "Choose folder..." native dialog (headless tests); symlink-escape protection (test skipped here).
+- Retry loop with the real model (it never needed a retry in the measured runs; verified by scripted tests).
+- 7B models (not installed).
 
 ### Not implemented
-- Terminal/command execution (deliberately excluded), file deletion/rename, multi-file atomic patches.
-- Semantic/embedding search (search is substring + keyword-scored retrieval, computed on demand; no persistent index).
-- Authentication (backend is localhost-only; anyone with access to this PC's localhost can use it).
-- Non-Windows testing.
+- Terminal/command execution (excluded by design), file deletion/rename, multi-file patches, deletion inside the symbol strategy.
+- Better-than-SEARCH/REPLACE strategy for non-Python files (no improvement measured/claimed).
+- Semantic search, search for languages other than English, news-specific providers, result caching.
+- Authentication; non-Windows testing; Ollama-side tuning that needs system/env changes (flash attention, KV-cache quantization) - documented, not changed.
 
-## Security posture (as built)
-Localhost bind; CORS limited to localhost; Ollama URL must be local; workspace paths are relative, resolved and confined to the authorized root; `.env`, keys, `*.db`, `.git`, `node_modules` etc. are blocked from reading/searching/patching; retrieved code is wrapped as untrusted data in prompts; no file changes without approval; AI output is never executed except in the benchmark, which needs explicit consent and runs an import-allowlisted `python -I` subprocess with a timeout (best-effort, **not** a true sandbox). Path-traversal, secret-file, conflict and rollback behaviours have automated tests.
+## Known limitations (read these)
+- **"Cited" is not "true".** Citation checks are lexical; a model can cite a real source and still answer a different question (observed once in 4). Time-sensitive answers without web access come from the 3B model's memory and were stale in every test, even when it said it couldn't verify; the banner, not the model, is the safeguard.
+- DuckDuckGo's HTML endpoint is a free, unofficial interface; it rate-limits or changes without notice (handled: Wikipedia fallback, then an honest "unverified"). Wikipedia needs `web_contact` to read pages.
+- Web answers are slow: 22-62 s (page reading + ~28 tok/s prompt processing).
+- Patch strategy gains are measured on 11 small Python tasks; real code will be harder. Always review the diff.
+- Free RAM often 1-3 GB with your normal apps open; the browser and other apps use more than PHOENIX. Close heavy apps for long runs.
+- One generation at a time; in-memory lock assumes a single backend process.
+- Frontend main bundle ~569 KB (176 KB gzip).
 
-## Known limitations / issues
-- Quality: 3B model. Bug analysis was inconsistent (see BENCHMARKS.md); patch generation succeeded on the simple demo but only 1/3 on the benchmark patch tasks.
-- Speed: ~5-8 tok/s; first request after idle +10-15 s; benchmark/patch/explain runs take 10-30 s each.
-- RAM: free memory dropped as low as 446 MB while the model and a browser were running. Close heavy apps for long runs.
-- Context: workspace requests use `workspace_num_ctx` 4096 and a 6000-char excerpt budget; large files need a line range for patch proposals.
-- Frontend bundle ~560 KB (all highlight.js languages).
-- One generation at a time (chat, ask, patch and benchmark share a lock); in-memory, assumes a single backend process.
-- Rollback restores only the file a patch changed; it is not a general version-control replacement. Use Git for real safety.
+## Security posture
+Localhost bind; local-only CORS/Ollama URL; workspace confinement; secrets blocked; web/file content treated as untrusted and delimited in prompts; web fetches restricted to public hosts (re-checked on redirects), robots.txt respected, size/time capped; no terminal execution; edits need explicit approval; benchmark execution needs consent and is restricted (best effort, not a sandbox). Internet is used only when you enable it, and only for search queries and page requests.
 
 ## Compatibility with future models
-Model ids are plain strings in settings/messages; switching needs no migration. A v1.0 database (made before workspace/patches existed) opens unchanged, with new tables and settings defaults added automatically (tested).
+Model ids are plain strings in settings/messages; switching needs no migration. A v1.0 database opens unchanged (tested), including the new `patches.meta` column and new setting defaults.

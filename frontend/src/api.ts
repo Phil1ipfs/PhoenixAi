@@ -20,7 +20,7 @@ export interface Settings {
   ollama_url: string; model: string; system_prompt: string; num_ctx: number;
   temperature: number; num_predict: number; timeout_s: number; max_prompt_chars: number;
   workspace_num_ctx: number; workspace_context_chars: number;
-  web_mode: "off" | "auto" | "always"; web_max_sources: number; web_timeout_s: number; web_contact: string;
+  web_mode: "off" | "auto" | "always"; web_max_sources: number; web_timeout_s: number; web_contact: string; wikimedia_pages: boolean;
   keep_alive: string; num_thread: number; memory_guard: boolean; min_free_mb: number;
 }
 export interface Health {

@@ -28,6 +28,8 @@ import httpx
 USER_AGENT = "PhoenixAI/1.1 (local personal research assistant)"   # plain text: DuckDuckGo rate-limits UAs that mention "robots"
 MAX_PAGE_BYTES = 600_000
 MAX_REDIRECTS = 3
+WIKIMEDIA_SUFFIXES = (".wikipedia.org", ".wikimedia.org", ".wiktionary.org", ".wikidata.org", ".wikibooks.org", ".wikiquote.org",
+                      ".wikisource.org", ".wikinews.org", ".wikiversity.org", ".wikivoyage.org", ".mediawiki.org")
 STOP = set("""the a an and or of to in is are was were be been it this that for with on as by at from what who whom how why does
 do did can could would should will which where when about tell me my i you your please give show current currently latest
 today now right new recent recently""".split())
@@ -183,8 +185,9 @@ def _public_ip(host: str) -> bool:
 
 class WebClient:
     def __init__(self, timeout: float = 8.0, transport: httpx.AsyncBaseTransport | None = None,
-                 resolver: Callable[[str], bool] | None = None, contact: str = ""):
+                 resolver: Callable[[str], bool] | None = None, contact: str = "", wikimedia_pages: bool = False):
         self.timeout, self.contact = timeout, contact.strip()
+        self.wikimedia_pages = wikimedia_pages
         self.user_agent = USER_AGENT if not self.contact else USER_AGENT[:-1] + f"; contact: {self.contact})"
         self._client = httpx.AsyncClient(transport=transport, timeout=timeout, headers={"User-Agent": self.user_agent},
                                          follow_redirects=False)
@@ -248,7 +251,21 @@ class WebClient:
             self._robots[base] = cached = (time.time(), rp)
         return cached[1] is not None and cached[1].can_fetch(self.user_agent, url)
 
+    def wikimedia_page_blocked(self, url: str) -> str | None:
+        """Wikimedia policy: full-page reads need an explicit opt-in AND an identifiable operator contact. Never bypassed."""
+        host = (urlparse(url).hostname or "").lower()
+        if not any(host == h[1:] or host.endswith(h) for h in WIKIMEDIA_SUFFIXES):
+            return None
+        if not self.wikimedia_pages:
+            return "Wikipedia page reading is off (search snippets only); enable it in Settings"
+        if not self.contact:
+            return "Wikipedia page reading needs an operator contact in Settings -> Web contact"
+        return None
+
     async def fetch_text(self, url: str) -> tuple[str, list[str]]:
+        why = self.wikimedia_page_blocked(url)
+        if why:
+            raise WebError("policy", why)
         if not await self.allowed_by_robots(url):
             raise WebError("robots", "Page not fetched (robots.txt disallows or could not be checked)")
         r = await self.get(url)

@@ -38,26 +38,26 @@ export default function Bench({ busy, setBusy }: { busy: boolean; setBusy: (b: b
   return (
     <div className="min-w-0 flex-1 overflow-y-auto p-6">
       <div className="mx-auto max-w-4xl space-y-4">
-        <h1 className="text-xl font-semibold text-orange-500">Local coding benchmark</h1>
+        <h1 className="text-xl font-semibold ember-text">Local coding benchmark</h1>
         <p className="text-sm text-zinc-400">Runs fixed tasks against the <b>selected model</b>. Python answers are checked by executing real tests. It runs the model’s code in a restricted subprocess (import allowlist, timeout) — best-effort hardening, not a security sandbox — so it only runs when you confirm below. Expect several minutes on CPU.</p>
         <div className="flex flex-wrap items-center gap-4 text-sm">
           <label className="flex items-center gap-2"><input type="checkbox" checked={confirm} onChange={(e) => setConfirm(e.target.checked)} /> I allow PHOENIX to execute model-generated test code</label>
           <label className="flex items-center gap-2"><input type="checkbox" checked={quick} onChange={(e) => setQuick(e.target.checked)} /> Quick run (1 task per category)</label>
           <label className="flex items-center gap-2">Patch strategy
-            <select aria-label="Patch strategy" value={strategy} onChange={(e) => setStrategy(e.target.value)} className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs">
+            <select aria-label="Patch strategy" value={strategy} onChange={(e) => setStrategy(e.target.value)} className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs">
               <option value="auto">auto (current product)</option><option value="symbol">symbol</option><option value="search_replace">search/replace + retries</option><option value="legacy">legacy (single try)</option>
             </select></label>
           {busy && abortRef.current
-            ? <button onClick={() => abortRef.current?.abort()} className="rounded bg-red-600 px-3 py-1">■ Stop</button>
-            : <button onClick={run} disabled={!confirm || busy} className="rounded bg-orange-600 px-4 py-1 font-medium disabled:opacity-40">Run benchmark</button>}
+            ? <button onClick={() => abortRef.current?.abort()} className="rounded-lg bg-red-600 text-white px-3 py-1">Stop</button>
+            : <button onClick={run} disabled={!confirm || busy} className="rounded ember-bg text-white px-4 py-1 font-medium disabled:opacity-40">Run benchmark</button>}
         </div>
-        {error && <div className="text-sm text-red-400" role="alert">⚠ {error}</div>}
+        {error && <div className="text-sm text-red-400" role="alert">{error}</div>}
         {busy && <div className="text-sm text-zinc-400" data-testid="bench-progress">Running {current || "…"} ({live.length}/{total || "?"})</div>}
         {(live.length > 0 || shown) && (
           <>
           {!summary && !running && shown && <div className="text-xs text-zinc-500">Showing the last saved run.</div>}
-          <table className="w-full text-sm" data-testid="bench-results">
-            <thead><tr className="text-left text-zinc-500"><th>Task</th><th>Result</th><th>Latency</th><th>tok/s</th><th>Detail</th></tr></thead>
+          <div className="overflow-x-auto rounded-2xl border border-zinc-800"><table className="w-full text-sm [&_td]:px-3 [&_th]:px-3 [&_th]:py-2 [&_th]:font-medium" data-testid="bench-results">
+            <thead><tr className="bg-zinc-900 text-left text-zinc-500"><th>Task</th><th>Result</th><th>Latency</th><th>tok/s</th><th>Detail</th></tr></thead>
             <tbody>
               {(live.length ? live : shown?.results ?? []).map((r) => (
                 <tr key={r.id} className="border-t border-zinc-800">
@@ -69,11 +69,11 @@ export default function Bench({ busy, setBusy }: { busy: boolean; setBusy: (b: b
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
           </>
         )}
         {shown && (
-          <div className="rounded border border-zinc-800 p-3 text-sm" data-testid="bench-summary">
+          <div className="rounded-lg border border-zinc-800 p-3 text-sm" data-testid="bench-summary">
             <div className="mb-2 text-zinc-400">Model <b className="text-zinc-200">{shown.model}</b> · {shown.finished_at.slice(0, 19).replace("T", " ")}</div>
             <div className="grid grid-cols-2 gap-x-6 gap-y-1">
               {Object.entries(shown.categories).map(([c, v]) => <div key={c}>{LABELS[c] ?? c}: <b>{v.passed}/{v.total}</b></div>)}
