@@ -2,13 +2,13 @@ import { useState } from "react";
 import type { Message } from "./api";
 import { IconCheck, IconCopy, Logo } from "./Icons";
 import Markdown from "./Markdown";
-import { SourceList, WebStatus, linkCitations } from "./Sources";
+import { SearchDetails, SourceList, WebStatus, linkCitations } from "./Sources";
 
 function Dots() {
   return <span className="inline-flex gap-1" aria-label="working">{[0, 150, 300].map((d) => <i key={d} style={{ animationDelay: `${d}ms` }} className="h-1.5 w-1.5 animate-pulse rounded-full bg-orange-500" />)}</span>;
 }
 
-export default function MessageView({ m, last, busy, statusMsg }: { m: Message; last: boolean; busy: boolean; statusMsg: string }) {
+export default function MessageView({ m, last, busy, statusMsg, onFresh }: { m: Message; last: boolean; busy: boolean; statusMsg: string; onFresh?: () => void }) {
   const [copied, setCopied] = useState(false);
   const web = m.metrics?.web;
   const streaming = busy && last;
@@ -34,16 +34,14 @@ export default function MessageView({ m, last, busy, statusMsg }: { m: Message; 
           ? <div className={streaming ? "caret" : ""}><Markdown text={linkCitations(m.content, web?.sources)} /></div>
           : streaming ? <span className="flex items-center gap-2 text-sm text-zinc-400"><Dots />{statusMsg || "Thinking… (the first reply can take a while while the model loads)"}</span> : null}
         <SourceList web={web} />
-        {!streaming && <WebStatus web={web} />}
+        {!streaming && <WebStatus web={web} onFresh={last && !busy ? onFresh : undefined} />}
+        {!streaming && <SearchDetails web={web} />}
         {!streaming && (m.content || mt?.status === "stopped") && (
           <div className="mt-2 flex items-center gap-3 text-xs text-zinc-500">
             {m.content && <button onClick={copy} aria-label="Copy reply" title="Copy reply" className="flex items-center gap-1 rounded-md px-1.5 py-1 opacity-100 transition hover:bg-zinc-800 hover:text-zinc-200 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100">
               {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}{copied ? "Copied" : "Copy"}
             </button>}
-            {mt?.tokens_per_sec !== undefined && (
-              <span>{m.model} · {mt.tokens_per_sec ?? "?"} tok/s · {((mt.wall_ms ?? 0) / 1000).toFixed(1)}s{mt.status === "stopped" ? " · stopped" : ""}</span>
-            )}
-            {mt?.status === "stopped" && mt.tokens_per_sec === undefined && <span>{m.model} · stopped</span>}
+            {mt?.status === "stopped" && <span>stopped</span>}
           </div>
         )}
       </div>

@@ -93,13 +93,15 @@ export default function App() {
     try { setSettings(await api.saveSettings({ web_mode: mode })); } catch (e) { setError((e as Error).message); }
   };
 
-  const send = async () => {
-    const text = input.trim();
+  /** `again`: resend this text with the search cache bypassed ("Search again" on a cached answer). */
+  const send = async (again?: string) => {
+    const text = (again ?? input).trim();
     if (!text || busy) return;
     setError(""); setNotices([]); setStatusMsg("");
     let id = activeId;
     if (!id) { const c = await api.createConversation(); id = c.id; setActiveId(id); }
-    setInput(""); setBusy(true); stickRef.current = true;
+    if (again === undefined) setInput("");
+    setBusy(true); stickRef.current = true;
     setMessages((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "" }]);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -112,7 +114,7 @@ export default function App() {
         else if (e.type === "sources") patchLast((m) => ({ ...m, metrics: { ...m.metrics, web: { mode: "", needed: true, reasons: [], status: "sources_found", sources: e.sources } as WebMeta } }));
         else if (e.type === "done") patchLast(() => e.message);
         else if (e.type === "error") { setError(`${e.kind}: ${e.message}`); patchLast((m) => ({ ...m, error: e.message })); }
-      });
+      }, { fresh: again !== undefined });
     } catch (e) {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
     } finally {
@@ -165,7 +167,8 @@ export default function App() {
           <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto">
             <div className="mx-auto max-w-3xl space-y-6 px-4 py-6">
               {messages.length === 0 && <EmptyState health={health} onPick={setInput} />}
-              {messages.map((m, i) => <MessageView key={m.id ?? `t${i}`} m={m} last={i === messages.length - 1} busy={busy} statusMsg={statusMsg} />)}
+              {messages.map((m, i) => <MessageView key={m.id ?? `t${i}`} m={m} last={i === messages.length - 1} busy={busy} statusMsg={statusMsg}
+                onFresh={messages[i - 1]?.role === "user" ? () => send(messages[i - 1].content) : undefined} />)}
             </div>
           </div>
           {!atBottom && messages.length > 0 && (
@@ -177,7 +180,7 @@ export default function App() {
               {error && <Banner tone="error" onDismiss={() => setError("")}>{error}{/low_memory|out_of_memory/.test(error) ? " — try closing other applications." : ""}</Banner>}
             </div>
           )}
-          <Composer value={input} busy={busy} webMode={settings?.web_mode} onChange={setInput} onSend={send} onStop={stop} onWebMode={setWebMode} />
+          <Composer value={input} busy={busy} webMode={settings?.web_mode} onChange={setInput} onSend={() => send()} onStop={stop} onWebMode={setWebMode} />
         </main>
       </div>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onSaved={() => { refreshHealth(); refreshSettings(); }} />}

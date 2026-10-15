@@ -1,7 +1,10 @@
-export interface WebSource { id: number; title: string; url: string; fetched: boolean; retrieved_at?: string; excerpt?: string }
+export interface WebSource { id: number; title: string; url: string; fetched: boolean; retrieved_at?: string; excerpt?: string; published?: string | null; cached?: boolean; used?: boolean }
+export interface SearchLogEntry { step: string; provider?: string; query?: string; url?: string; urls?: string[]; requested_at?: string; status: string; error?: string; duration_ms?: number; published?: string | null; used_in_answer?: boolean }
 export interface WebMeta {
   mode: string; needed: boolean; reasons: string[]; sources: WebSource[]; note?: string;
-  /** not_needed | unverified_disabled | unverified_offline | unverified_no_results | sources_found | grounded | grounded_weak | sources_not_cited */
+  search?: { query: string; cached: boolean; cached_at?: string | null; duration_ms?: number; log?: SearchLogEntry[] };
+  verification?: { verdict: string; label: string; reasons?: string[] };
+  /** not_needed | unverified_disabled | unverified_offline | unverified_no_results | sources_found | grounded | grounded_weak | sources_not_cited | sources_conflict | weather_live | weather_unavailable */
   status: string;
   citations?: { valid_ids: number[]; invalid_ids: number[]; weak: { id: number; sentence: string }[]; has_citations: boolean };
 }
@@ -71,8 +74,8 @@ export type StreamEvent =
   | { type: "error"; kind: string; message: string };
 
 /** Streams NDJSON events. Abort the signal to stop generation (server saves the partial text). */
-export function streamMessage(id: string, content: string, signal: AbortSignal, onEvent: (e: StreamEvent) => void) {
-  return streamPost(`/api/conversations/${id}/messages`, { content }, signal, onEvent);
+export function streamMessage(id: string, content: string, signal: AbortSignal, onEvent: (e: StreamEvent) => void, opts: { fresh?: boolean } = {}) {
+  return streamPost(`/api/conversations/${id}/messages`, { content, ...(opts.fresh ? { fresh: true } : {}) }, signal, onEvent);
 }
 
 export async function streamPost<E = StreamEvent>(url: string, payload: unknown, signal: AbortSignal, onEvent: (e: E) => void) {

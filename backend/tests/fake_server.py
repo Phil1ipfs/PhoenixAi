@@ -18,6 +18,7 @@ import uvicorn  # noqa: E402
 from app import research, sysinfo  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.providers import ChatChunk, ModelProvider  # noqa: E402
+from test_weather import GEO, forecast_json  # noqa: E402
 
 PAGE = """<html><head><title>Prime Minister of Japan - Encyclopedia</title></head><body>
 <p>The prime minister of Japan is the head of government of Japan.</p>
@@ -61,6 +62,10 @@ def mock_web() -> research.WebClient:
         host, path = req.url.host, req.url.path
         if path == "/robots.txt":
             return httpx.Response(404)
+        if host == "geocoding-api.open-meteo.com":     # same real-shaped data as tests/test_weather.py
+            return httpx.Response(200, json={"results": GEO.get(req.url.params.get("name", "").lower(), [])})
+        if host == "api.open-meteo.com":
+            return httpx.Response(200, json=forecast_json(float(req.url.params["latitude"]), float(req.url.params["longitude"])))
         if host == "html.duckduckgo.com":
             link = "https%3A%2F%2Fnews.test%2Fpm"
             return httpx.Response(200, text=f'<a class="result__a" href="//duckduckgo.com/l/?uddg={link}">Prime Minister of Japan</a>'

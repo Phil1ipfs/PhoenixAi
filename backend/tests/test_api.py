@@ -125,6 +125,54 @@ def test_rejects_foreign_host_and_cross_site_writes(tmp_path):
         assert c.post("/api/conversations", headers=hdr).status_code == 201, hdr
 
 
+def test_blocked_send_leaves_no_orphan_user_message(tmp_path, monkeypatch):
+    from app import sysinfo
+
+    class Big(FakeProvider):
+        async def list_models(self):
+            return [{"name": "qwen2.5-coder:3b", "size": 2 * 2**30}]
+
+    p = Big()
+    c = TestClient(create_app(tmp_path / "t.db", p))
+    cid = c.post("/api/conversations").json()["id"]
+    monkeypatch.setattr(sysinfo, "memory", lambda: {"total_mb": 12000, "available_mb": 300})
+    ev = events(c.post(f"/api/conversations/{cid}/messages", json={"content": "hello"}))
+    assert ev[-1]["type"] == "error" and ev[-1]["kind"] == "low_memory" and ev[-1]["discarded"] and p.calls == []
+    assert c.get(f"/api/conversations/{cid}").json()["messages"] == []           # nothing left behind
+    monkeypatch.setattr(sysinfo, "memory", lambda: {"total_mb": 12000, "available_mb": 8000})
+    ev = events(c.post(f"/api/conversations/{cid}/messages", json={"content": "hello again"}))   # and the retry works
+    assert ev[-1]["type"] == "done"
+    assert [m["content"] for m in c.get(f"/api/conversations/{cid}").json()["messages"]] == ["hello again", "Hello"]
+
+
+def test_concurrent_sends_one_accepted_one_409(tmp_path):
+    import httpx
+
+    class Slow(FakeProvider):
+        async def chat_stream(self, model, messages, options, timeout):
+            await asyncio.sleep(0.3)
+            async for chunk in super().chat_stream(model, messages, options, timeout):
+                yield chunk
+
+    p = Slow()
+    app = create_app(tmp_path / "t.db", p)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as cl:
+            cid = (await cl.post("/api/conversations")).json()["id"]
+            r = await asyncio.gather(*[cl.post(f"/api/conversations/{cid}/messages", json={"content": f"m{i}"}) for i in range(3)])
+            codes = sorted(x.status_code for x in r)
+            msgs = (await cl.get(f"/api/conversations/{cid}")).json()["messages"]
+            model_calls = len(p.calls)
+            again = await cl.post(f"/api/conversations/{cid}/messages", json={"content": "after"})
+            return codes, msgs, model_calls, again.status_code
+
+    codes, msgs, model_calls, again = asyncio.run(run())
+    assert codes == [200, 409, 409]
+    assert [m["role"] for m in msgs] == ["user", "assistant"] and model_calls == 1   # rejected sends stored nothing
+    assert again == 200                                                                # the claim was released
+
+
 def test_persistence_across_reopen(tmp_path):
     db = Database(tmp_path / "p.db")
     cid = db.create_conversation("m")["id"]

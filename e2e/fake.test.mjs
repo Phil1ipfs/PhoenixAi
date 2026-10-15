@@ -52,9 +52,19 @@ try {
   check("web auto: source link displayed with real URL", (await link.getAttribute("href")) === "https://news.test/pm");
   check("source link opens safely in new tab", (await link.getAttribute("target")) === "_blank" && /noopener/.test(await link.getAttribute("rel")));
   check("source labelled 'page read'", await page.getByTestId("sources").getByText(/page read/).isVisible());
-  const cite = page.locator(".md a", { hasText: "[1]" });
-  check("citation [1] in the answer is a link to the source", (await cite.getAttribute("href")) === "https://news.test/pm");
+  const cite = page.locator(".md a.cite", { hasText: "news.test" });
+  check("citation [1] in the answer is an inline source chip linking to the source", (await cite.first().getAttribute("href")) === "https://news.test/pm" && !(await page.locator(".md").last().innerText()).includes("[1]"));
   check("grounded status shown", await page.getByText(/Cited from 1 live source/).isVisible());
+  check("search line says a live search ran, from the request log", /Live search completed · DuckDuckGo/.test(await page.getByTestId("search-line").last().innerText()));
+  await page.getByTestId("search-details").last().locator("summary").click();
+  check("search details list the real query and provider", /query: Who is the current prime minister of Japan\?/.test(await page.getByTestId("search-details").last().innerText())
+    && /search · DuckDuckGo · ok/.test(await page.getByTestId("search-details").last().innerText()));
+  // ---- same question again: cached results are labelled, and "Search again" bypasses the cache
+  await ask("Who is the current prime minister of Japan?");
+  check("repeat question: cached results labelled with retrieval time", /Cached results used: retrieved at \d\d:\d\d/.test(await page.getByTestId("search-line").last().innerText()));
+  await page.getByRole("button", { name: "Search again" }).click();
+  await page.getByRole("button", { name: "Send" }).waitFor({ timeout: 20000 });
+  check("'Search again' runs a fresh live search", /Live search completed/.test(await page.getByTestId("search-line").last().innerText()));
   await page.screenshot({ path: path.join(shots, "web-auto.png") });
 
   // ---- fabricated citation is stripped and flagged
@@ -64,16 +74,31 @@ try {
   check("fabricated [9] citation removed from displayed answer", !body.includes("[9]") && /unverified citation removed/.test(body));
   check("warning shown for invalid citation", await page.getByText(/couldn.t be matched|invalid citation/).isVisible());
 
+  // ---- weather: the reported "I mean USA" conversation (deterministic, no model, location-aware)
+  await page.getByRole("button", { name: "New chat" }).click();
+  await ask("What's the weather tomorrow?");
+  check("weather: asks for a city when none is given", await page.getByText(/Which city or town would you like the weather tomorrow for\?/).isVisible());
+  await ask("I mean USA");
+  check("weather: a country never gets one temperature", await page.getByText(/far too large for one forecast/).isVisible());
+  await ask("How about Los Angeles?");
+  const wx = page.locator(".md").last();
+  await wx.getByText(/Los Angeles, California, United States/).first().waitFor({ timeout: 10000 }).catch(() => {});
+  const wxText = await wx.innerText();
+  check("weather: forecast for the resolved city, for the day asked earlier", /Los Angeles, California, United States/.test(wxText) && /Forecast for Saturday 17 Oct/.test(wxText), wxText.slice(0, 120));
+  check("weather: says it does not describe the whole country", /does not describe the United States as a whole/.test(wxText));
+  check("weather: Open-Meteo source chip + live-data status", (await wx.locator("a.cite", { hasText: "open-meteo.com" }).count()) === 1 && await page.getByText(/Live data, fetched just now and validated/).isVisible());
+  await page.screenshot({ path: path.join(shots, "weather.png") });
+
   // ---- offline fallback
   await page.getByRole("button", { name: "New chat" }).click();
   await ask("Who is the current prime minister of Japan? offline-test");
-  check("offline: honest 'couldn't verify live' banner", await page.getByText(/Couldn.t verify live/).first().isVisible());
+  check("offline: 'Live search unavailable' banner names the offline fallback", await page.getByText(/Live search unavailable.*offline fallback/).first().isVisible());
   check("offline: chat still answered", (await page.locator(".md").last().innerText()).includes("could not verify"));
 
   // ---- timeless question in auto mode: no web UI at all
   await page.getByRole("button", { name: "New chat" }).click();
   await ask("Explain quicksort");
-  check("timeless question: no sources and no banner", (await page.getByTestId("sources").count()) === 0 && (await page.getByText(/Cited from|Couldn.t verify|internet access is off/).count()) === 0);
+  check("timeless question: no sources and no banner", (await page.getByTestId("sources").count()) === 0 && (await page.getByText(/Cited from|Live search unavailable|internet access is off/).count()) === 0);
 
   // ---- settings panel
   await page.getByRole("button", { name: "Settings" }).click();

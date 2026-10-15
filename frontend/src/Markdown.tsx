@@ -32,7 +32,9 @@ function CodeBlock({ children }: { children?: ReactNode }) {
 export default function Markdown({ text }: { text: string }) {
   return (
     <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { detect: true }]]} components={{ table: ({ children }) => <div className="md-table"><table>{children}</table></div>, pre: ({ children }) => <CodeBlock>{children}</CodeBlock>, a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-sky-400 underline-offset-2 hover:underline">{children}</a> }}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { detect: true }]]} components={{ table: ({ children }) => <div className="md-table"><table>{children}</table></div>, pre: ({ children }) => <CodeBlock>{children}</CodeBlock>, a: ({ href, title, children }) => title?.startsWith("cite|")
+            ? <a href={href} target="_blank" rel="noopener noreferrer" title={title.slice(5)} className="cite mx-0.5 inline-flex items-center rounded-full border border-zinc-700 bg-zinc-800/80 px-2 py-px align-baseline text-[11px] font-medium leading-4 text-zinc-300 no-underline transition-colors hover:border-orange-500/60 hover:text-orange-300">{children}</a>
+            : <a href={href} target="_blank" rel="noopener noreferrer" className="text-sky-400 underline-offset-2 hover:underline">{children}</a> }}>
         {text}
       </ReactMarkdown>
     </div>

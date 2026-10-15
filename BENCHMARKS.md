@@ -50,6 +50,21 @@ Reading: with the web on, 3/4 answers matched the retrieved sources and were cit
 - First real attempt found 3 bugs mocks had hidden (DDG rate-limiting a UA containing "robots", double gzip decoding, Wikipedia 403); all fixed and regression-tested.
 - Not measured: accuracy on a large question set, other languages/regions, rate-limit behaviour under heavy use.
 
+## 2b. Live research run after the search/weather rework (2026-10-16, Web Always, real qwen2.5-coder:3b)
+One conversation, real DuckDuckGo/Wikipedia/pages, temp database, free RAM 0.5-2.0 GB (memory guard shrank the context each turn). Timings come from the stored request log.
+
+| Turn | Search (real requests) | Result | Answer vs retrieved text | Wall / first token |
+|---|---|---|---|---|
+| Who is the current president of the Philippines? | DuckDuckGo ok 1.1 s, 5 URLs; Wikipedia pages not read (page reading off), Britannica HTTP 403 -> 2 snippet-only sources | `grounded_weak`, verdict **partly supported** ("newest date in the sources is 2022") | Ferdinand "Bongbong" Marcos Jr. [1][2], matches the snippets | 37.8 s / 30.7 s |
+| Until when? (searched as "...president of the Philippines? — Until when?") | DuckDuckGo **rate-limited** (human check) 0.4 s; Wikipedia refused: no contact set | `unverified_offline`, "Live search unavailable" | model memory: hedged, no term end given | 15.2 s |
+| How about the USA? | same two failures | `unverified_offline` | model memory: "Joe Biden ... as of October 2023" (**stale**) | 8.9 s |
+| What about the UK? | same two failures | `unverified_offline` | model memory: "Rishi Sunak" (**stale**) | 9.2 s |
+| What is the latest stable version of Python? | DuckDuckGo ok 0.9 s; 3 python.org pages fetched 0.35-0.64 s | `grounded`, verdict **supported**; 1 of 3 sources cited | "Python 3.15.0" [1], matches python.org/downloads/latest | 50.3 s / 45.1 s |
+
+Reading: every "live" claim is backed by a logged request; when search failed the UI said so and the stale answers were labelled as offline knowledge, not presented as checked. **DuckDuckGo's free HTML endpoint rate-limited this IP after two searches about 40 s apart**, and the Wikipedia fallback needs `web_contact` (Wikimedia policy), so with defaults Web Always cannot sustain several searches per minute. Setting Settings -> Web contact (your e-mail/URL) enables the Wikipedia API fallback; PHOENIX does not try to get around either limit. Prompt processing of ~1.5 k tokens of evidence dominates the time to first token (30-45 s at ~28 tok/s).
+
+Search-only timings (no model): DuckDuckGo 0.9-1.1 s, page fetches 0.1-0.6 s each (parallel), Open-Meteo geocode + forecast 0.2-1.8 s.
+
 ## 3. RAM and CPU (Priority 4)
 **Who uses the memory** (idle snapshot, Working Set): Ollama model runner `llama-server` 2,141 MB | **Edge (46 processes) 1,863 MB** | svchost 1,065 MB | Claude 646 MB | VS Code 603 MB | Spotify 350 MB | Discord 318 MB | Defender 293 MB. Free RAM with the model loaded: ~1.5 GB.
 PHOENIX components: backend (Python) **~58-60 MB**; UI in headless Edge ~490 MB working set / ~230 MB private across 9 browser processes with a 7 MB JS heap (the browser, not the app, is the cost); no Node process is needed in production. So the model is ~95 % of PHOENIX's footprint, and your other apps matter more than PHOENIX does. PHOENIX does not (and I did not) stop other apps or Windows services.

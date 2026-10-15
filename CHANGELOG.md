@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased - Real-time search transparency (2026-10-16)
+**What was wrong:** Web Always searched every message, including code, passwords and greetings (they were sent to DuckDuckGo); progress showed one "Searching the web…" for the whole pipeline; nothing recorded which requests were really made, so "live" could not be checked; irrelevant results (e.g. shopping pages) went to the model; slow pages had no overall time limit and a Stop could leave fetches running; follow-ups like "Until when?" were searched as the literal text; every repeat question re-searched (no cache), and there was no way to tell live from earlier results.
+- `gather_steps()`: real progress events (Searching / Retrieving N sources / Checking information / Generating answer), a per-request log (question, query, provider, time, status, duration, URLs, publication date, cited or not), relevance filter, page-read time budget with cancellation, publication dates from page metadata only.
+- Web Always: privacy/sense skip rules with a visible reason ("Live search skipped: ..."); failures show "Live search unavailable ... offline fallback".
+- Cache: in memory, 10 min / 30 min / 1 h by topic, failures never cached, original retrieval time kept, "Cached results used ... Search again" (`fresh: true`).
+- Follow-ups anchored on the last real question ("Until when?" then "How about the USA?" both refer to the president question).
+- UI: search line, verification label ("Answer supported by the sources" only when the automatic checks pass, else "not independently verified"), published dates, "not cited" marks, Search details panel.
+- Tests: +32 web-mode tests (`test_web_modes.py`, incl. 1 live DuckDuckGo test), +5 UI checks.
+
+## Unreleased - Weather accuracy, location reasoning, source conflicts (2026-10-16)
+**The bug** (reproduced before fixing, with mocks shaped like real Open-Meteo/DuckDuckGo responses): "What's the weather tomorrow?" searched the web with no location; "I mean USA" was not linked to the previous question (Web Auto: no search at all; Web Always: searched the literal text "I mean USA"); two pages reporting 12 °C and 31 °C went to the model with nothing checking that they conflict, so "both sources agree" could pass; and the old Open-Meteo helper took the first geocoder hit, which for "USA" is **Uşak, Türkiye**.
+- New `weather.py`: deterministic place/day/hour parsing with conversation context; countries, states/provinces and continents get a clarifying question instead of a number; validated geocoding (exact-name preference, ambiguity -> list real candidates, country/region hints, "City, State" qualifiers, coordinates checked); validated forecast (coordinates, units, time zone, plausible values); answer written from the numbers with place, coordinates, time zone, current-vs-forecast labels, °F-first for US places. No model call: ~0.2-1.8 s instead of 20-100 s. Errors say "I won't guess".
+- `research.py`: removed the unsafe `weather_source`; `contextual_query` for follow-ups; `apply_conflict_guard` removes "sources agree" claims and appends each source's value when temperatures disagree; `move_leading_citations` fixes "1. [1]".
+- UI: statuses `weather_live`, `weather_unavailable`, `sources_conflict`; inline source chips after the text, cleaned source titles, per-reply speed line hidden.
+- Security/backend (same day): `ollama_url` parsed (look-alike hosts refused); Host/Origin middleware against DNS rebinding and cross-site writes; a send refused by the memory guard leaves no orphan user message; concurrent sends get 409 instead of queueing.
+- Tests: +49 weather/location/citation regression tests (incl. 1 live), +5 UI checks, +4 security/concurrency tests.
+
 ## Unreleased - "Ember" UI redesign (frontend only; backend and APIs untouched)
 - Design system: tokens in `index.css` (charcoal/midnight dark, warm light), accents Ember/Electric/Violet, glass surfaces, shared `ui.tsx` primitives (IconButton, Banner, Sheet, button/input classes), `Icons.tsx`, persisted appearance store in `theme.ts`.
 - Components split out of `App.tsx`: `Sidebar` (search, date groups, inline delete confirm, collapsible on desktop), `Composer`, `MessageView`, `EmptyState`.

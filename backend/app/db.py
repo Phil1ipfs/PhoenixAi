@@ -163,6 +163,13 @@ class Database:
         self.conn.commit()
         return {"id": cur.lastrowid, "role": role, "content": content, "model": model, "metrics": metrics, "created_at": ts}
 
+    def delete_message(self, cid: str, message_id: int) -> bool:
+        """Remove one message (and its document links), e.g. a user turn that was never answered because the send was refused."""
+        self.conn.execute("DELETE FROM message_files WHERE message_id=?", (message_id,))
+        cur = self.conn.execute("DELETE FROM messages WHERE id=? AND conversation_id=?", (message_id, cid))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def list_messages(self, cid: str) -> list[dict]:
         rows = self.conn.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY id", (cid,)).fetchall()
         files: dict[int, list[dict]] = {}

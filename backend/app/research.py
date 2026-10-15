@@ -11,6 +11,7 @@ Design rules
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import ipaddress
 import re
@@ -194,6 +195,8 @@ class WebClient:
         self._resolver = resolver or _public_ip
         self._robots: dict[str, tuple[float, RobotFileParser | None]] = {}
         self._last_search = 0.0
+        self.cache = SearchCache()
+        self.ddg_paused_until = 0.0     # set for DDG_COOLDOWN_S after DuckDuckGo shows its human check
 
     async def aclose(self):
         await self._client.aclose()
@@ -262,7 +265,8 @@ class WebClient:
             return "Wikipedia page reading needs an operator contact in Settings -> Web contact"
         return None
 
-    async def fetch_text(self, url: str) -> tuple[str, list[str]]:
+    async def fetch_page(self, url: str) -> tuple[str, list[str], str | None]:
+        """(title, text blocks, publication date stated by the page or None)."""
         why = self.wikimedia_page_blocked(url)
         if why:
             raise WebError("policy", why)
@@ -272,7 +276,12 @@ class WebClient:
         ctype = r.headers.get("content-type", "")
         if "html" not in ctype and "text" not in ctype:
             raise WebError("parse", f"Unsupported content type: {ctype[:40]}")
-        return extract_page(r.text)
+        title, blocks = extract_page(r.text)
+        return title, blocks, extract_published(r.text)
+
+    async def fetch_text(self, url: str) -> tuple[str, list[str]]:
+        title, blocks, _ = await self.fetch_page(url)
+        return title, blocks
 
 
 # ------------------------------------------------------------------ search providers
@@ -280,7 +289,13 @@ def _strip_tags(s: str) -> str:
     return _clean(re.sub(r"<[^>]+>", " ", s))
 
 
+DDG_COOLDOWN_S = 300
+
+
 async def search_duckduckgo(web: WebClient, query: str, limit: int) -> list[dict]:
+    left = web.ddg_paused_until - time.time()
+    if left > 0:                                   # it asked for a human check: respect that, don't keep knocking
+        raise WebError("blocked", f"DuckDuckGo paused for {left:.0f} s after it asked for a human check (rate limit)")
     wait = 1.0 - (time.time() - web._last_search)  # at most ~1 search/second
     if wait > 0:
         await asyncio.sleep(wait)
@@ -288,6 +303,7 @@ async def search_duckduckgo(web: WebClient, query: str, limit: int) -> list[dict
     r = await web.get("https://html.duckduckgo.com/html/?q=" + quote(query), accept="text/html")
     page = r.text
     if "anomaly-modal" in page or "unusual traffic" in page.lower():
+        web.ddg_paused_until = time.time() + DDG_COOLDOWN_S
         raise WebError("blocked", "DuckDuckGo asked for a human check (rate-limited)")
     out = []
     for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>(.*?)(?=<a[^>]+class="result__a"|\Z)', page, re.S):
@@ -321,87 +337,227 @@ async def search_wikipedia(web: WebClient, query: str, limit: int) -> list[dict]
              "snippet": _strip_tags(i.get("snippet", ""))} for i in items]
 
 
-async def weather_source(web: WebClient, question: str) -> dict | None:
-    """Live weather from Open-Meteo (free, no key) for questions like 'weather in Manila'."""
-    m = re.search(r"\b(?:weather|forecast|temperature)\b.*?\b(?:in|at|for)\s+([A-Za-z][A-Za-z .'-]{1,40})", question, re.I)
+# ------------------------------------------------------------------ publication dates (only what the page itself states)
+_PUB_META = re.compile(r"<meta[^>]+(?:property|name|itemprop)\s*=\s*[\"'](?:article:published_time|og:article:published_time|datePublished|"
+                       r"pubdate|publishdate|publish-date|dc\.date|dc\.date\.issued|sailthru\.date|parsely-pub-date)[\"'][^>]*>", re.I)
+
+
+def _iso_date(s: str) -> str | None:
+    m = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", s or "")
     if not m:
         return None
-    place = re.sub(r"\b(today|now|right now|tonight|tomorrow|please)\b.*$", "", m.group(1), flags=re.I).strip(" ?.")
-    if not place:
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+    except ValueError:
         return None
-    g = (await web.get("https://geocoding-api.open-meteo.com/v1/search?count=1&name=" + quote(place), accept="application/json")).json()
-    if not g.get("results"):
+
+
+def extract_published(markup: str) -> str | None:
+    """Publication date from the page's own metadata (meta tags, JSON-LD datePublished, first <time datetime>), else None."""
+    head = markup[:200_000]
+    for m in _PUB_META.finditer(head):
+        c = re.search(r"content\s*=\s*[\"']([^\"']+)", m.group(0), re.I)
+        if c and _iso_date(c.group(1)):
+            return _iso_date(c.group(1))
+    for pat in (r"\"datePublished\"\s*:\s*\"([^\"]+)\"", r"<time[^>]+datetime\s*=\s*[\"']([^\"']+)"):
+        m = re.search(pat, head, re.I)
+        if m and _iso_date(m.group(1)):
+            return _iso_date(m.group(1))
+    return None
+
+
+# ------------------------------------------------------------------ cache (in memory, per WebClient, never on disk)
+FAST_CHANGING = ("weather", "price", "market data", "news / events", "results / standings", "mentions a recent/future year")
+
+
+def cache_ttl(reasons: list[str]) -> int:
+    """Freshness limit: fast-changing topics 10 min, other time-sensitive questions 30 min, everything else 1 h."""
+    if any(r.startswith(FAST_CHANGING) for r in reasons):
+        return 600
+    return 1800 if reasons else 3600
+
+
+class SearchCache:
+    def __init__(self, max_items: int = 64):
+        self.items: dict[str, tuple[float, "Evidence"]] = {}
+        self.max_items = max_items
+
+    def get(self, key: str, ttl: float) -> tuple[float, "Evidence"] | None:
+        hit = self.items.get(key)
+        if hit and time.time() - hit[0] <= ttl:
+            return hit
+        self.items.pop(key, None)
         return None
-    loc = g["results"][0]
-    url = (f"https://api.open-meteo.com/v1/forecast?latitude={loc['latitude']}&longitude={loc['longitude']}"
-           "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,wind_speed_10m&timezone=auto")
-    c = (await web.get(url, accept="application/json")).json()["current"]
-    text = (f"Current conditions in {loc['name']}, {loc.get('country', '')} (observed {c['time']} local time): "
-            f"temperature {c['temperature_2m']} °C (feels like {c['apparent_temperature']} °C), humidity {c['relative_humidity_2m']}%, "
-            f"precipitation {c['precipitation']} mm, wind {c['wind_speed_10m']} km/h.")
-    return {"title": f"Open-Meteo live weather for {loc['name']}", "url": "https://open-meteo.com/", "snippet": text, "excerpt": text, "fetched": True}
+
+    def put(self, key: str, ev: "Evidence") -> None:
+        self.items[key] = (time.time(), copy.deepcopy(ev))
+        while len(self.items) > self.max_items:
+            self.items.pop(next(iter(self.items)))
+
+
+# ------------------------------------------------------------------ "Web Always": what must never be sent to a search engine
+_SECRETS = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{36,}|\bsk-[A-Za-z0-9_-]{20,}|"
+                      r"\bxox[abprs]-|\bAIza[0-9A-Za-z_-]{35}\b|\bpassword\s*[:=]", re.I)
+_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+_SMALL_TALK = re.compile(r"^(hi|hello|hey|thanks|thank you|ty|ok|okay|bye|good (morning|night|evening)|yes|no|cool|nice)[!. ]*$", re.I)
+
+
+def search_skip_reason(question: str) -> str | None:
+    """Why a message should NOT be sent to a search engine even in Web Always (privacy / nothing to look up)."""
+    q = question.strip()
+    if _SECRETS.search(q) or _EMAIL.search(q):
+        return "the message contains what looks like a password, key or e-mail address, which PHOENIX never sends to a search engine"
+    if "```" in q or len(re.findall(r"[;{}]\s*$", q, re.M)) >= 3:
+        return "the message contains code, which PHOENIX keeps on this computer"
+    if len(q) > 500:
+        return "the message is long private text; only short questions are sent to a search engine"
+    if _SMALL_TALK.match(q):
+        return "there is nothing to look up in a greeting or short reply"
+    return None
 
 
 # ------------------------------------------------------------------ orchestration
 @dataclass
 class Evidence:
-    status: str                      # ok | no_results | offline | error
+    status: str                      # ok | no_results | no_relevant | offline | error
     sources: list[dict] = field(default_factory=list)
     note: str = ""
     queries: list[str] = field(default_factory=list)
+    log: list[dict] = field(default_factory=list)      # one entry per real request: search, page fetch, filter, cache
+    cached: bool = False
+    cached_at: str | None = None
+    duration_ms: int = 0
 
 
-async def gather(web: WebClient, question: str, max_sources: int = 3) -> Evidence:
-    """Search, then read the top pages. Every returned source came from a real provider response."""
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _ms(t0: float) -> int:
+    return round((time.perf_counter() - t0) * 1000)
+
+
+async def gather_steps(web: WebClient, question: str, max_sources: int = 3, *, fresh: bool = False, ttl: float = 3600,
+                       page_budget_s: float | None = None):
+    """Search -> read pages -> drop irrelevant ones, yielding ("status", text) as each step starts and finally
+    ("result", Evidence). Every source comes from a real provider response; nothing is filled in."""
+    t_all = time.perf_counter()
     query = re.sub(r"\s+", " ", question).strip()[:200]
+    key = query.lower()
+    if not fresh:
+        hit = web.cache.get(key, ttl)
+        if hit:
+            stored, cev = hit
+            ev = copy.deepcopy(cev)
+            ev.cached, ev.cached_at = True, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stored))
+            for s in ev.sources:
+                s["cached"] = True                                   # retrieved_at keeps the ORIGINAL fetch time
+            ev.log = [{"step": "cache", "question": question, "query": query, "provider": "cache", "requested_at": _now(),
+                       "status": "hit", "age_s": round(time.time() - stored), "urls": [s["url"] for s in ev.sources]}]
+            yield "status", f"Using cached search results from {ev.cached_at[11:16]}…"
+            ev.duration_ms = _ms(t_all)
+            yield "result", ev
+            return
     ev = Evidence("error", queries=[query])
-    sources: list[dict] = []
-    try:
-        w = await weather_source(web, question)
-        if w:
-            sources.append(w)
-    except WebError:
-        pass
-    except (ValueError, KeyError):
-        pass
+    yield "status", "Searching the web…"
     results: list[dict] = []
     errors: list[str] = []
     for name, fn in (("DuckDuckGo", search_duckduckgo), ("Wikipedia", search_wikipedia)):
+        entry = {"step": "search", "question": question, "query": query, "provider": name, "requested_at": _now()}
+        t0 = time.perf_counter()
         try:
             results = await fn(web, query, max_sources + 2)
-            if results:
-                break
-            errors.append(f"{name}: no results")
+            entry.update(status="ok" if results else "no_results", urls=[r["url"] for r in results])
+            if not results:
+                errors.append(f"{name}: no results")
         except WebError as e:
+            entry.update(status="error", error=e.message, urls=[])
             errors.append(f"{name}: {e.message}")
-    if not results and not sources:
+        entry["duration_ms"] = _ms(t0)
+        ev.log.append(entry)
+        if results:
+            break
+    if not results:
         offline = all(("Network error" in e or "Timed out" in e) for e in errors) if errors else False
         ev.status = "offline" if offline else ("no_results" if any("no results" in e for e in errors) else "error")
         ev.note = "; ".join(errors) or "no search provider answered"
-        return ev
+        ev.duration_ms = _ms(t_all)
+        yield "result", ev
+        return
+
+    picked = results[:max_sources]
+    yield "status", f"Retrieving {len(picked)} source{'s' if len(picked) != 1 else ''}…"
 
     async def read(res: dict) -> dict:
-        s = {"title": res["title"], "url": res["url"], "snippet": res["snippet"], "excerpt": "", "fetched": False}
+        s = {"title": res["title"], "url": res["url"], "snippet": res["snippet"], "excerpt": "", "fetched": False, "published": None}
+        entry = {"step": "fetch", "provider": urlparse(res["url"]).hostname, "url": res["url"], "requested_at": _now()}
+        t0 = time.perf_counter()
         try:
-            title, blocks = await web.fetch_text(res["url"])
+            title, blocks, published = await web.fetch_page(res["url"])
+            s["published"] = published
             ex = select_excerpt(blocks, question)
             if ex:
                 s["excerpt"], s["fetched"] = ex, True
                 s["title"] = title or s["title"]
+            entry["status"] = "fetched" if ex else "fetched_no_matching_text"
         except WebError as e:
             s["fetch_error"] = e.kind
+            entry.update(status="not_fetched", error=e.message)
+        entry.update(duration_ms=_ms(t0), published=s["published"])
+        ev.log.append(entry)
         if not s["excerpt"]:
             s["excerpt"] = res["snippet"]  # snippet-only; flagged fetched=False
         return s
 
-    pages = await asyncio.gather(*(read(r) for r in results[:max_sources]))
-    sources.extend(p for p in pages if p["excerpt"])
-    sources = sources[: max_sources + 1]
+    tasks = [asyncio.create_task(read(r)) for r in picked]
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=page_budget_s or web.timeout * 1.5)
+    finally:
+        for t in tasks:                                        # Stop/cancel: never leave page fetches running
+            if not t.done():
+                t.cancel()
+    pages = []
+    for t, res in zip(tasks, picked):
+        if t in done and not t.cancelled() and t.exception() is None:
+            pages.append(t.result())
+        else:                                                  # over the time budget: keep the search snippet, say so
+            pages.append({"title": res["title"], "url": res["url"], "snippet": res["snippet"], "excerpt": res["snippet"],
+                          "fetched": False, "published": None, "fetch_error": "deadline"})
+            ev.log.append({"step": "fetch", "provider": urlparse(res["url"]).hostname, "url": res["url"], "requested_at": _now(),
+                           "status": "not_fetched", "error": "page took too long; search snippet used"})
+
+    yield "status", "Checking information…"
+    keys = [k for k in keywords(question) if not k.isdigit()]
+    kept, dropped = [], []
+    for p in pages:
+        if not p["excerpt"]:
+            continue
+        hay = f"{p['title']} {p['excerpt']} {p['snippet']}".lower()
+        p["relevance"] = sum(1 for k in keys if k in hay)
+        (kept if (p["relevance"] > 0 or not keys) else dropped).append(p)
+    for p in dropped:
+        ev.log.append({"step": "filter", "url": p["url"], "status": "dropped_irrelevant",
+                       "detail": "none of the question's key terms appear in this page"})
+    sources = kept[: max_sources + 1]
     for i, s in enumerate(sources, 1):
         s["id"] = i
-        s["retrieved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    ev.sources, ev.status = sources, ("ok" if sources else "no_results")
+        s["retrieved_at"] = _now()
+        s["cached"] = False
+    ev.sources = sources
+    ev.status = "ok" if sources else ("no_relevant" if dropped else "no_results")
     ev.note = "; ".join(errors)
+    ev.duration_ms = _ms(t_all)
+    if ev.status == "ok":
+        web.cache.put(key, ev)
+    yield "result", ev
+
+
+async def gather(web: WebClient, question: str, max_sources: int = 3, **kw) -> Evidence:
+    """Non-streaming wrapper around gather_steps (tests, benchmarks)."""
+    ev = Evidence("error", note="no result")
+    async for kind, val in gather_steps(web, question, max_sources, **kw):
+        if kind == "result":
+            ev = val
     return ev
 
 
@@ -450,7 +606,68 @@ def verify_citations(answer: str, sources: list[dict]) -> dict:
     return {"valid_ids": valid, "invalid_ids": invalid, "weak": weak, "has_citations": bool(cited)}
 
 
+def move_leading_citations(answer: str) -> str:
+    """'1. [1] Some fact' shows the number twice: put leading [n] markers after the sentence instead."""
+    def fix(line: str) -> str:
+        m = re.match(r"^(\s*(?:\d+[.)]|[-*•])\s+)((?:\[\d{1,3}\]\s*)+)(.*)$", line)
+        return f"{m.group(1)}{m.group(3)} {m.group(2).strip()}" if m and m.group(3).strip() else line
+    return "\n".join(fix(l) for l in answer.split("\n"))
+
+
 def sanitize_answer(answer: str, invalid_ids: list[int]) -> str:
     for i in invalid_ids:
         answer = answer.replace(f"[{i}]", "[unverified citation removed]")
-    return answer
+    return move_leading_citations(answer)
+
+
+# ------------------------------------------------------------------ conversation context and conflicting evidence
+CONTINUATION = re.compile(r"^(?:no[, ]+|ok(?:ay)?[, ]+|yes[, ]+)?(?:i mean|i meant|how about|what about|and|then|what of|how long|until when|till when|"
+                          r"same (?:for|with|in)|why|really|is that|are you sure)\b", re.I)
+
+
+def contextual_query(question: str, history: list[dict]) -> str:
+    """A short follow-up ("I mean USA", "what about tomorrow?") is searched together with the previous user question,
+    never on its own (searching the literal text 'I mean USA' returns unrelated pages)."""
+    q = question.strip()
+    if len(q.split()) > 10 or not CONTINUATION.match(q):
+        return q
+    # anchor on the last question that was not itself a follow-up: "Until when?" then "How about the USA?" both refer to
+    # "Who is the current president of the Philippines?"
+    users = [m["content"].strip() for m in history[-12:] if m.get("role") == "user" and m.get("content")]
+    anchor = next((u for u in reversed(users) if not (len(u.split()) <= 10 and CONTINUATION.match(u))), None)
+    return f"{anchor[:160]} — {q}"[:300] if anchor else q
+
+
+TEMP_RE = re.compile(r"(-?\d{1,3}(?:\.\d+)?)\s*(?:°|º|degrees?)?\s*(celsius|fahrenheit|c|f)\b(?![a-z])", re.I)
+AGREE_RE = re.compile(r"\b(?:both|all|the|these|two|three)\s+(?:\w+\s+)?sources?\s+(?:all\s+)?(?:agree|are consistent|are in agreement|confirm|concur|"
+                      r"report the same|say the same)\b|\bsources?\s+(?:all\s+)?(?:agree|concur)\b|\bin agreement\b|\bconsistent across\b", re.I)
+
+
+def temperatures_c(text: str) -> list[float]:
+    out = []
+    for m in TEMP_RE.finditer(text):
+        v, unit = float(m.group(1)), m.group(2).lower()
+        out.append(round((v - 32) * 5 / 9, 1) if unit.startswith("f") else v)
+    return [v for v in out if -90 <= v <= 60]
+
+
+def source_conflicts(sources: list[dict], tolerance: float = 3.0) -> dict | None:
+    """Do two retrieved sources report temperatures that cannot both describe the same thing (no pair of values within
+    `tolerance` degrees C)? Checks only what the sources literally say; it cannot know if they describe different places."""
+    per = {s["id"]: temperatures_c(f"{s.get('excerpt', '')} {s.get('snippet', '')}") for s in sources}
+    per = {k: v for k, v in per.items() if v}
+    ids = sorted(per)
+    pairs = [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:] if min(abs(x - y) for x in per[a] for y in per[b]) > tolerance]
+    return {"values": {k: per[k][:3] for k in ids}, "pairs": pairs} if pairs else None
+
+
+def apply_conflict_guard(answer: str, sources: list[dict]) -> tuple[str, dict | None]:
+    """If sources disagree, an answer must not say they agree: drop those sentences and add a deterministic caveat."""
+    info = source_conflicts(sources)
+    if not info:
+        return answer, None
+    kept = [s for s in re.split(r"(?<=[.!?])\s+|\n+", answer) if s.strip() and not AGREE_RE.search(s)]
+    shown = "; ".join(f"[{k}] {', '.join(f'{v:g} °C' for v in vals)}" for k, vals in info["values"].items())
+    kept.append(f"Note: the retrieved sources report different temperatures ({shown}). They may describe different places or times, "
+                "so none of these values is confirmed for your question.")
+    return "\n\n".join(kept), info

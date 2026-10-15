@@ -8,6 +8,9 @@ Constraint: ~12 GB RAM, CPU-only, free/local only. **Several other Claude sessio
 |---|---|---|---|
 | L1 | Security | `ollama_url` locality check used `startswith`, so `http://127.0.0.1.evil.com` and `http://localhost@evil.com` were accepted (breaks the "no cloud, localhost only" guarantee). Now parsed with `urlsplit`; host must be exactly 127.0.0.1 / localhost / ::1. | `main.py` `is_local_url`, new test `test_ollama_url_rejects_lookalike_hosts`; backend suite **131 passed, 1 skipped** |
 
+| L2 | Security | S1: Host-header and cross-site Origin checks (pure ASGI middleware, so streaming/Stop is untouched). Upload review (S2) found: cross-site text/plain upload now blocked; DOCX DOCTYPE/ENTITY scan only covers the first 2 KB/20 KB; PDF child has a time limit but no memory limit. | `test_rejects_foreign_host_and_cross_site_writes` |
+| L3 | Backend | B1: a send refused by the memory guard no longer leaves an unanswered user message (`db.delete_message`; error event carries `discarded: true`). Concurrent sends: a short-lived claim makes the second send return 409 instead of queueing and storing a duplicate user turn. | `test_blocked_send_leaves_no_orphan_user_message`, `test_concurrent_sends_one_accepted_one_409`; backend 255 passed, 5 failed (pre-existing in the document tests, fail without these changes too), 1 skipped |
+
 ## Backlog (priority = impact vs effort/risk)
 | P | ID | Role | Objective | Files | Acceptance | Depends on |
 |---|---|---|---|---|---|---|

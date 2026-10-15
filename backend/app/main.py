@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import research, sysinfo, verify
+from . import research, sysinfo, verify, weather
 from .chat import auto_title, build_messages
 from .db import DEFAULT_SETTINGS, Database
 from .benchmark_routes import register_benchmark
@@ -29,6 +29,7 @@ from .phoenix_files.store import FileStore
 from .providers import ModelProvider, OllamaProvider, ProviderError
 
 DATA_DIR = Path(os.environ.get("PHOENIX_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
+CLAIM_TTL_S = 30
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}  # "testserver" is Starlette's TestClient host
 LOCAL_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8000", "http://localhost:8000"]
 
@@ -70,6 +71,7 @@ class SendMessage(BaseModel):
     content: str = Field(..., min_length=1, max_length=50000)
     model: str | None = None
     file_ids: list[str] = Field(default_factory=list, max_length=8)   # documents attached with this message
+    fresh: bool = False                                                # bypass the search cache ("Search again")
 
 
 def is_local_url(url: str) -> bool:
@@ -112,6 +114,7 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
     state = {"provider": provider or OllamaProvider(db.get_settings()["ollama_url"]), "custom": provider is not None}
     web_holder: dict = {"client": web, "injected": web is not None}
     gen_lock = asyncio.Lock()  # one generation at a time: protects RAM on a 12 GB machine
+    claim = {"t": 0.0}         # monotonic time of the last accepted send that has not yet taken the lock (expires: never sticks)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -245,7 +248,9 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
         conv = db.get_conversation(cid)
         if not conv:
             raise HTTPException(404, "Conversation not found")
-        if gen_lock.locked():
+        # The lock is only taken once the stream starts, so also honour a claim made by a send that has passed this check
+        # but not started yet; otherwise two quick sends are both accepted and the second just queues behind the first.
+        if gen_lock.locked() or time.monotonic() - claim["t"] < CLAIM_TTL_S:
             raise HTTPException(409, "Another generation is already running")
 
         s = db.get_settings()
@@ -258,6 +263,7 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
             if not file_store.is_attached(cid, fid) and file_store.attachment_count(cid) >= 8:
                 raise HTTPException(409, "A conversation can have at most 8 attached files")
             linked.append(f)
+        claim["t"] = time.monotonic()   # nothing below awaits or raises HTTP errors; if it ever crashed, the TTL frees the claim
         history_before = db.list_messages(cid)
         first = not history_before
         prev_q = next((m["content"] for m in reversed(history_before) if m["role"] == "user"), None)
@@ -281,8 +287,15 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
         if turn["mode"] in ("question", "summary"):
             return document_turn(cid, user_msg, model, s, turn, body.content)
 
+        # ---- weather: resolved deterministically (place -> coordinates -> validated forecast), never by the model
+        wctx = weather.context_from_history(history_before)
+        wreq = weather.parse_request(body.content, wctx)
+        if wreq and not (s["web_mode"] == "off" and wreq.place and not weather.broad_scope(wreq.place)):
+            return weather_turn(cid, user_msg, s, wreq, wctx)
+
         # ---- evidence workflow: detect -> retrieve -> ground -> (after generation) verify citations
-        det = research.needs_verification(body.content)
+        qtext = research.contextual_query(body.content, history_before)   # a follow-up is searched with its previous question
+        det = research.needs_verification(qtext)
         mode = s["web_mode"]
         use_web = mode == "always" or (mode == "auto" and det["needed"])
         web_meta: dict = {"mode": mode, "needed": det["needed"], "reasons": det["reasons"], "sources": [],
@@ -295,25 +308,39 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
             else:
                 msgs.insert(0, {"role": "system", "content": extra.strip()})
 
+        skip = research.search_skip_reason(body.content) if use_web else None
+        if skip:                                   # privacy / nothing to look up: say so instead of silently searching or not
+            use_web = False
+            web_meta.update(status="search_skipped", note=skip)
+
         async def prepare():
             msgs = [dict(m) for m in messages]
             if use_web:
-                yield {"type": "status", "message": "Searching the web…"}
+                ev = research.Evidence("error", note="search did not run")
                 try:
-                    ev = await research.gather(get_web(s), body.content, s["web_max_sources"])
+                    async for kind, val in research.gather_steps(get_web(s), qtext, s["web_max_sources"], fresh=body.fresh,
+                                                                 ttl=research.cache_ttl(det["reasons"])):
+                        if kind == "status":
+                            yield {"type": "status", "message": val}
+                        else:
+                            ev = val
                 except Exception as e:  # noqa: BLE001 - research must never break chat
                     ev = research.Evidence("error", note=f"{type(e).__name__}: {e}")
+                web_meta["search"] = {"query": qtext, "cached": ev.cached, "cached_at": ev.cached_at, "duration_ms": ev.duration_ms,
+                                      "log": ev.log}
                 if ev.status == "ok" and ev.sources:
                     full_sources.extend(ev.sources)
-                    public = [{k: x.get(k) for k in ("id", "title", "url", "fetched", "retrieved_at")} | {"excerpt": x["excerpt"][:400]}
-                              for x in ev.sources]
+                    public = [{k: x.get(k) for k in ("id", "title", "url", "fetched", "retrieved_at", "published", "cached")}
+                              | {"excerpt": x["excerpt"][:400]} for x in ev.sources]
                     web_meta.update(status="sources_found", queries=ev.queries, note=ev.note, sources=public)
                     yield {"type": "sources", "sources": public}
                     add_system(msgs, research.WEB_SYSTEM)
-                    msgs[-1]["content"] = research.build_web_prompt(body.content, ev.sources)
+                    msgs[-1]["content"] = research.build_web_prompt(qtext, ev.sources)
+                    yield {"type": "status", "message": "Generating answer…"}
                 else:
+                    why = "no relevant sources found" if ev.status == "no_relevant" else ev.note
                     web_meta.update(status="unverified_offline" if ev.status in ("offline", "error") else "unverified_no_results",
-                                    note=ev.note)
+                                    note=why)
             if web_meta["status"].startswith("unverified"):
                 why = {"unverified_disabled": "internet access is turned off in Settings",
                        "unverified_offline": "the web search failed: " + (web_meta.get("note") or "network unavailable"),
@@ -326,12 +353,22 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
 
         def post(text: str) -> str:
             if full_sources:
-                web_meta["verification"] = verify.check_answer(body.content, text, full_sources, time_sensitive=det["needed"])
+                web_meta["verification"] = verify.check_answer(qtext, text, full_sources, time_sensitive=det["needed"])
                 cit = research.verify_citations(text, full_sources)
                 text = research.sanitize_answer(text, cit["invalid_ids"])
                 web_meta["citations"] = cit
                 web_meta["status"] = ("sources_not_cited" if not cit["valid_ids"]
                                       else "grounded_weak" if cit["weak"] or cit["invalid_ids"] else "grounded")
+                text, conflict = research.apply_conflict_guard(text, full_sources)   # no "sources agree" when the numbers differ
+                if conflict:
+                    web_meta["conflict"] = conflict
+                    web_meta["status"] = "sources_conflict"
+                used = {s["url"] for s in full_sources if s["id"] in cit["valid_ids"]}   # did the answer actually cite it?
+                for src in web_meta["sources"]:
+                    src["used"] = src["url"] in used
+                for entry in (web_meta.get("search") or {}).get("log", []):
+                    if entry.get("step") == "fetch":
+                        entry["used_in_answer"] = entry.get("url") in used
             return text
 
         return generate(cid, user_msg, messages, model, base_options(s), s, prepare=prepare, post=post)
@@ -340,9 +377,40 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
         """A deterministic assistant reply (no model call), e.g. 'this PDF is scanned' or 'nothing matched in the document'."""
         async def stream() -> AsyncIterator[str]:
             async with gen_lock:
+                claim["t"] = 0.0
                 yield ndjson({"type": "start", "user_message": user_msg, "model": model})
                 yield ndjson({"type": "token", "content": text})
                 msg = db.add_message(cid, "assistant", text, model=model, metrics={"docs": docs_meta, "status": "complete", "canned": True})
+                yield ndjson({"type": "done", "message": msg})
+        return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+    def weather_turn(cid: str, user_msg: dict, s: dict, wreq: weather.Request, wctx: weather.Ctx) -> StreamingResponse:
+        """Weather answered from validated Open-Meteo data, or a clarifying question. No model call, so it is fast and cannot invent."""
+        async def stream() -> AsyncIterator[str]:
+            async with gen_lock:
+                claim["t"] = 0.0
+                yield ndjson({"type": "start", "user_message": user_msg, "model": s["model"]})
+                web = get_web(s) if s["web_mode"] != "off" else None
+                if wreq.place and not weather.broad_scope(wreq.place):
+                    yield ndjson({"type": "status", "message": "Looking up live weather…"})
+                try:
+                    out = await weather.run(web, wreq, wctx)
+                except Exception as e:  # noqa: BLE001 - weather must never break chat
+                    out = weather.error_outcome(type(e).__name__, wreq, wctx)
+                if out is None:
+                    out = weather.error_outcome("internet access is turned off in Settings", wreq, wctx)
+                web_meta = None
+                if out.kind == "result":
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                    srcs = [{k: x.get(k) for k in ("id", "title", "url", "fetched")} | {"retrieved_at": ts, "excerpt": x["excerpt"][:400]} for x in out.sources]
+                    web_meta = {"mode": s["web_mode"], "needed": True, "reasons": ["weather"], "sources": srcs, "status": "weather_live", "note": out.note}
+                    yield ndjson({"type": "sources", "sources": srcs})
+                elif out.kind == "error":
+                    web_meta = {"mode": s["web_mode"], "needed": True, "reasons": ["weather"], "sources": [], "status": "weather_unavailable",
+                                "note": out.state.get("reason", "")}
+                yield ndjson({"type": "token", "content": out.text})
+                metrics = {"weather": out.state, "status": "complete", "canned": True, **({"web": web_meta} if web_meta else {})}
+                msg = db.add_message(cid, "assistant", out.text, model=None, metrics=metrics)
                 yield ndjson({"type": "done", "message": msg})
         return StreamingResponse(stream(), media_type="application/x-ndjson")
 
@@ -410,10 +478,12 @@ def create_app(db_path: Path | str | None = None, provider: ModelProvider | None
         async def stream() -> AsyncIterator[str]:
             nonlocal messages, options, extra_metrics
             async with gen_lock:
+                claim["t"] = 0.0
                 yield ndjson({"type": "start", "user_message": user_msg, "model": model})
                 guard = await memory_guard(model, options, s)
                 if guard["action"] == "block":
-                    yield ndjson({"type": "error", "kind": "low_memory", "message": guard["message"]})
+                    db.delete_message(cid, user_msg["id"])  # refused before any model work: don't leave an unanswered user turn
+                    yield ndjson({"type": "error", "kind": "low_memory", "message": guard["message"], "discarded": True})
                     return
                 if guard["action"] == "warn":
                     options = {**options, "num_ctx": guard["num_ctx"]}

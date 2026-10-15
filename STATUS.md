@@ -3,8 +3,10 @@
 ## Verification summary
 | Layer | Result |
 |---|---|
-| Backend automated tests (`cd backend && .venv\Scripts\python -m pytest`) | **126 passed, 1 skipped** (symlink-escape test skipped: this Windows account can't create symlinks). No network or model needed; RAM is pinned in a fixture so tests don't depend on the machine. |
-| Deterministic UI tests (`e2e/fake.test.mjs`, scripted model + mocked web, real Edge) | **26/26** |
+| Backend automated tests (`cd backend && .venv\Scripts\python -m pytest`) | **336 passed, 5 failed, 1 skipped** (2026-10-16). The 5 failures are all in the in-progress document-upload work (`test_files_api.py`: 3x sensitive-file upload returns 415 instead of 403, no-network test; `test_files_extract.py`: chunk determinism) and fail identically without the weather/search/security changes. Includes 49 weather/location/citation tests, 32 web-mode tests, and 2 live tests (Open-Meteo, DuckDuckGo; run only when online; both passed). |
+| Deterministic UI tests (`e2e/fake.test.mjs`, scripted model + mocked web, real Edge) | **35/35** (incl. the "weather tomorrow -> I mean USA -> How about Los Angeles?" conversation, search line, search details, cached -> "Search again") |
+| Live research with real Qwen 3B (BENCHMARKS.md 2b) | 5 turns: 2 genuinely searched and grounded (1 supported, 1 partly supported); 3 hit a DuckDuckGo rate limit with no Wikipedia contact set -> correctly labelled "Live search unavailable", and the model's offline answers were stale |
+| Live weather conversation (real Open-Meteo, model forbidden) | Clarifies "tomorrow" and "USA", resolves Los Angeles (34.06, -118.23) and New York (40.71, -73.99) with their own time zones, refuses one number for California; 0.2-1.8 s per turn; the model was never called |
 | Real-model browser tests (`e2e/ui.test.mjs`, `code.test.mjs`, `bench.test.mjs`) | **18/18, 20/20, 3/3** (the chat suite failed 2 checks once while the laptop was heavily loaded, then passed 18/18; those two checks were made load-tolerant) |
 | Real-model benchmark, product defaults | 23/23 (see BENCHMARKS.md for caveats) |
 | Real-network research run | 4 questions; 3 cited and consistent with sources, 1 cited but unresponsive (BENCHMARKS.md) |
@@ -39,6 +41,9 @@ Everything from v1.0/1.1 (chat, streaming, Stop, persistence, model switching, P
 - Authentication; non-Windows testing; Ollama-side tuning that needs system/env changes (flash attention, KV-cache quantization) - documented, not changed.
 
 ## Known limitations (read these)
+- **Web Always depends on a free, unofficial DuckDuckGo endpoint** that rate-limited this IP after two searches ~40 s apart (live run). The Wikipedia fallback only works after you set Settings -> Web contact. PHOENIX does not bypass either limit: after a human check it pauses DuckDuckGo for 5 minutes and goes straight to Wikipedia; when both fail it says "Live search unavailable".
+- Search cache is in memory (cleared on restart); the relevance filter is keyword-based; publication dates are shown only when a page states them.
+- **Weather:** broad places are recognised from a built-in list (countries/aliases, US states, Canadian provinces, Australian states, UK nations, continents) plus the geocoder's country code; a region outside that list (e.g. a Philippine province) can still be resolved as a town of the same name. English place names only. Forecast range is today + 3 days; "this weekend"/"next week" are not interpreted. The conflict guard compares temperatures only (not prices, dates or other numbers).
 - **"Cited" is not "true".** Citation checks are lexical; a model can cite a real source and still answer a different question (observed once in 4). Time-sensitive answers without web access come from the 3B model's memory and were stale in every test, even when it said it couldn't verify; the banner, not the model, is the safeguard.
 - DuckDuckGo's HTML endpoint is a free, unofficial interface; it rate-limits or changes without notice (handled: Wikipedia fallback, then an honest "unverified"). Wikipedia needs `web_contact` to read pages.
 - Web answers are slow: 22-62 s (page reading + ~28 tok/s prompt processing).
